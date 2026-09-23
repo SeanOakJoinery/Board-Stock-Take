@@ -1203,8 +1203,7 @@ function renderSuppliersTab(){
     </div>`;
 }
 function openAddSupplier(){
-  const layer = document.getElementById("modalLayer");
-  layer.innerHTML = `<div class="modal-bg" id="supBg"><div class="modal">
+  openModal(`
     <h3>Add supplier</h3>
     <label>Supplier name</label><input type="text" id="sp-name">
     <label>Contact person</label><input type="text" id="sp-contact">
@@ -1212,7 +1211,7 @@ function openAddSupplier(){
     <label>CC email (optional)</label><input type="text" id="sp-cc">
     <label style="display:flex;align-items:center;gap:7px;font-weight:400;margin-top:10px;"><input type="checkbox" id="sp-direct" style="width:auto;"> Send the weekly digest straight to this supplier (skip reviewing it yourself first)</label>
     <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitAddSupplier()">Add supplier</button></div>
-  </div></div>`;
+  `);
 }
 async function submitAddSupplier(){
   const name = document.getElementById("sp-name").value.trim();
@@ -1230,8 +1229,7 @@ async function submitAddSupplier(){
 }
 function openEditSupplier(sid){
   const s = state.data.suppliers[sid];
-  const layer = document.getElementById("modalLayer");
-  layer.innerHTML = `<div class="modal-bg" id="supBg"><div class="modal">
+  openModal(`
     <h3>Edit ${esc(s.name)}</h3>
     <label>Supplier name</label><input type="text" id="sp-name" value="${esc(s.name)}">
     <label>Contact person</label><input type="text" id="sp-contact" value="${esc(s.contactPerson||'')}">
@@ -1243,7 +1241,7 @@ function openEditSupplier(sid){
       <button class="btn" style="background:var(--red);color:#fff;" onclick="deleteSupplier('${sid}')">Delete</button>
       <button class="btn btn-primary" onclick="submitEditSupplier('${sid}')">Save</button>
     </div>
-  </div></div>`;
+  `);
 }
 async function submitEditSupplier(sid){
   const name = document.getElementById("sp-name").value.trim();
