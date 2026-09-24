@@ -1155,16 +1155,20 @@ async function submitSendToDispatch(){
     if(!ok){ state.busy = false; render(); return; }
 
     // ...then create the matching item directly in Dispatch's own data.
-    const snap = await dispatchBoardRef.child("items").once("value");
-    const items = Array.isArray(snap.val()) ? snap.val() : [];
+    // Atomic append (transaction) — a plain read-then-overwrite could
+    // wipe out a Dispatch change someone else saved in the same moment.
     const today = new Date().toLocaleDateString("en-GB", {day:"2-digit", month:"long", year:"numeric"});
-    items.push({
+    const newItem = {
       id: uid(), type: board.description, qty, ref,
       status: "unvinaged",
       addedDate: today, vinagedDate: null, readyDate: null, dispatchedDate: null, noteId: null,
       recipeSnapshot: [{ sourceApp: "boardStock", itemId: code, desc: board.description, deductQty: qty, location }]
+    };
+    await dispatchBoardRef.child("items").transaction(current => {
+      const items = Array.isArray(current) ? current : (current && typeof current === "object" ? Object.values(current) : []);
+      items.push(newItem);
+      return items;
     });
-    await dispatchBoardRef.child("items").set(items);
     toast(`Sent ${qty} ${board.unit} of ${code} to Dispatch.`, "ok");
     document.getElementById("sd-qty").value = "1";
     document.getElementById("sd-ref").value = "";
@@ -1506,7 +1510,9 @@ async function submitEditUser(id){
     : (u.apps || defaultApps());
   u.username = username;
   if (pin) u.pin = await hashPin(pin);
-  u.permissions = permissions;
+  // Merge, don't replace — replacing wiped this person's permissions in
+  // the other three apps (Dispatch, Stock List, Consumables).
+  u.permissions = { ...(u.permissions || {}), ...permissions };
   u.isRoot = isMainRoot(u) ? true : (rootBox ? rootBox.checked : u.isRoot);
   u.apps = isMainRoot(u) ? defaultApps() : apps;
   await saveSharedUsers();
