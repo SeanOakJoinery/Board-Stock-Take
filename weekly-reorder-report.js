@@ -81,14 +81,28 @@ function collectLowConsumables(consumablesStock) {
   const suppliers = consumablesStock.suppliers || {};
   const out = [];
 
+  // Counted items: packs of N (screws, confirmats, sanding discs…), "each"
+  // items (hinges, plates, handles, stopping tubs), pairs (drawer runners),
+  // rolls (edging, production rolls — whole rolls + the open roll's
+  // fraction) and tins (stains, lacquers) — see the Consumables app.
+  const UNIT_WORD = { per500: "pack(s)", each: "each", pair: "pair(s)", roll: "roll(s)", tin: "tin(s)" };
+  const ROLL_FRACTION = { Full: 1, "3/4": 0.75, "1/2": 0.5, "1/4": 0.25 };
   Object.values(consumablesStock.screwItems || {}).forEach((item) => {
-    const total = typeof item.qtyByLocation === "object"
+    const unit = UNIT_WORD[item.unit] ? item.unit : "per500";
+    const whole = typeof item.qtyByLocation === "object"
       ? Object.values(item.qtyByLocation || {}).reduce((a, v) => a + (Number(v) || 0), 0)
       : (item.qtyBundles || 0);
+    const openRolls = unit === "roll"
+      ? Object.values(item.openRollByLocation || {}).reduce((a, l) => a + (ROLL_FRACTION[l] || 0), 0)
+      : 0;
+    const total = whole + openRolls;
     if (total <= (item.reorderQty || 0)) {
       const supplier = item.supplierId ? suppliers[item.supplierId] : null;
+      const packNote = unit === "per500" ? `, packs of ${item.bundleSize || 500}` : "";
+      const name = item.size + (item.packSize ? ` (${item.packSize}${packNote})` : (packNote ? ` (${packNote.slice(2)})` : ""));
+      const onHand = openRolls ? `${whole} full + ${openRolls} open` : `${whole}`;
       out.push({
-        line: `${item.size}: ${total} bundle(s) on hand (reorder at ${item.reorderQty})`,
+        line: `${name}: ${onHand} ${UNIT_WORD[unit]} on hand (reorder at ${item.reorderQty})`,
         supplierEmail: supplier && supplier.email ? supplier.email.trim() : null,
         supplierName: supplier ? supplier.name : null,
         supplierContact: supplier ? supplier.contactPerson : null,
