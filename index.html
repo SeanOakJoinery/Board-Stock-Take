@@ -849,6 +849,7 @@ function visibleTabs(){
   const tabs = [{ key:"stock", label:"Stock", icon:"🪵" }];
   if (can("boardAddQty")) tabs.push({ key:"addqty", label:"Add", icon:"📥" });
   if (can("boardRemoveQty")) tabs.push({ key:"removeqty", label:"Remove", icon:"📤" });
+  if (can("boardAddQty") && can("boardRemoveQty")) tabs.push({ key:"count", label:"Stock Count", icon:"🔢" });
   if (can("boardSendToDispatch")) tabs.push({ key:"dispatch", label:"Send to Dispatch", icon:"🚚" });
   if (can("boardAddBoard")) tabs.push({ key:"boards", label:"Boards", icon:"➕" });
   if (can("boardViewLog")) tabs.push({ key:"log", label:"Log", icon:"📋" });
@@ -865,6 +866,7 @@ function renderShell(){
   if (state.tab === "stock") content = renderStock();
   else if (state.tab === "addqty") content = renderAddQty();
   else if (state.tab === "removeqty") content = renderRemoveQty();
+  else if (state.tab === "count") content = renderStockCount();
   else if (state.tab === "dispatch") content = renderSendToDispatch();
   else if (state.tab === "boards") content = renderBoardsAdmin();
   else if (state.tab === "log") content = renderLog();
@@ -1043,6 +1045,128 @@ async function submitAddQty(){
   if (ok){ document.getElementById("aq-qty").value = ""; document.getElementById("aq-note").value = ""; }
 }
 
+
+/* ---------------- STOCK COUNT (2026-09-24) ----------------
+   Walk the racks at one location and type what is physically there.
+   Blank = not counted (left alone). The difference shows as you type;
+   "Apply count" sets every counted board to the counted figure in one
+   save and logs each change as a "count" entry (who, when, before/after).
+   Typed figures are kept on this device until applied, so a count can be
+   interrupted and carried on later. */
+function countDraftKey(loc){ return "boardCountDraft:" + loc; }
+function loadCountDraft(loc){ try { return JSON.parse(localStorage.getItem(countDraftKey(loc)) || "{}"); } catch(e){ return {}; } }
+function saveCountDraft(loc, d){ try { localStorage.setItem(countDraftKey(loc), JSON.stringify(d)); } catch(e){} }
+function countLocation(){
+  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
+  if (!state.countLoc || !locations.includes(state.countLoc)) state.countLoc = locations[0];
+  return state.countLoc;
+}
+function renderStockCount(){
+  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
+  const loc = countLocation();
+  const draft = loadCountDraft(loc);
+  const q = (state.countSearch || "").toLowerCase();
+  const boards = [...state.data.boards].sort((a,b)=>a.code.localeCompare(b.code))
+    .filter(b => !q || `${b.code} ${b.description} ${b.size||''}`.toLowerCase().includes(q));
+  const counted = Object.keys(draft).length;
+  const lastCount = state.data.meta && state.data.meta.lastCount && state.data.meta.lastCount[loc];
+  return `
+    <div class="card">
+      <h2 style="margin-top:0;">Stock count</h2>
+      <p class="small-muted">Count what is physically at the location and type it in. Leave a board blank if you didn't count it. Nothing changes until you press <b>Apply count</b>.${lastCount ? `<br>Last count here: ${fmtDate(lastCount.ts)} by ${esc(lastCount.user)}.` : ''}</p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;">
+        <div><label>Location</label>
+          <select onchange="state.countLoc=this.value; render();">${locations.map(l=>`<option value="${esc(l)}" ${l===loc?'selected':''}>${esc(l)}</option>`).join("")}</select></div>
+        <div style="flex:1;min-width:200px;"><label>Find</label>
+          <input type="text" placeholder="Search by code or name…" value="${esc(state.countSearch||'')}" oninput="state.countSearch=this.value; render(); this.focus(); this.setSelectionRange(this.value.length,this.value.length);"></div>
+      </div>
+      <div style="overflow-x:auto;margin-top:12px;">
+      <table>
+        <thead><tr><th>Board</th><th>System</th><th>Counted</th><th>Difference</th></tr></thead>
+        <tbody>
+          ${boards.map(b => {
+            const sys = (b.qty && b.qty[loc]) || 0;
+            const has = Object.prototype.hasOwnProperty.call(draft, b.code);
+            const diff = has ? draft[b.code] - sys : null;
+            return `<tr>
+              <td><span class="mono">${esc(b.code)}</span> <span class="small-muted">${esc(b.description)}</span></td>
+              <td>${sys} ${esc(b.unit||'')}</td>
+              <td><input type="number" min="0" step="1" style="width:90px;" value="${has ? draft[b.code] : ''}" oninput="countInput(this, '${esc(b.code)}', ${sys})"></td>
+              <td id="cd-${esc(b.code)}" class="${diff>0?'qty-plus':diff<0?'qty-minus':''}">${diff===null ? '—' : (diff>0?'+':'') + diff}</td>
+            </tr>`;
+          }).join("") || `<tr><td colspan="4" class="empty">No boards match.</td></tr>`}
+        </tbody>
+      </table>
+      </div>
+      <div id="count-summary" class="small-muted" style="margin-top:10px;">${countSummaryText(loc)}</div>
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
+        <button class="btn btn-primary" onclick="applyStockCount()" ${state.busy || !counted ? "disabled" : ""}>${state.busy ? "Saving…" : "Apply count"}</button>
+        <button class="btn btn-ghost" onclick="if(confirm('Clear the figures typed for this location?')){ saveCountDraft(countLocation(), {}); render(); }" ${counted ? "" : "disabled"}>Clear</button>
+      </div>
+    </div>`;
+}
+function countSummaryText(loc){
+  const draft = loadCountDraft(loc);
+  let changes = 0;
+  Object.entries(draft).forEach(([code, v]) => {
+    const b = findBoard(state.data, code);
+    if (b && v !== ((b.qty && b.qty[loc]) || 0)) changes++;
+  });
+  const n = Object.keys(draft).length;
+  return n ? `${n} board(s) counted · ${changes} with a difference` : "Nothing counted yet.";
+}
+function countInput(input, code, sys){
+  const loc = countLocation();
+  const draft = loadCountDraft(loc);
+  if (input.value === "") delete draft[code];
+  else draft[code] = Math.max(0, parseInt(input.value, 10) || 0);
+  saveCountDraft(loc, draft);
+  const cell = document.getElementById("cd-" + code);
+  if (cell){
+    const diff = draft[code] === undefined ? null : draft[code] - sys;
+    cell.textContent = diff === null ? "—" : (diff > 0 ? "+" : "") + diff;
+    cell.className = diff > 0 ? "qty-plus" : diff < 0 ? "qty-minus" : "";
+  }
+  const sum = document.getElementById("count-summary");
+  if (sum) sum.textContent = countSummaryText(loc);
+  const applyBtn = [...document.querySelectorAll("button")].find(x => x.textContent.trim() === "Apply count");
+  if (applyBtn) applyBtn.disabled = !Object.keys(draft).length;
+}
+async function applyStockCount(){
+  const loc = countLocation();
+  const draft = loadCountDraft(loc);
+  const codes = Object.keys(draft);
+  if (!codes.length) return;
+  if (!confirm(`Apply the count for ${codes.length} board(s) at ${loc}? Boards with a difference will be set to the counted figure.`)) return;
+  const who = state.currentUser.username;
+  const ts = new Date().toISOString();
+  let changed = 0;
+  const ok = await mutate((data) => {
+    changed = 0;
+    codes.forEach(code => {
+      const b = findBoard(data, code);
+      if (!b) return;
+      if (typeof b.qty !== "object" || b.qty === null) b.qty = {};
+      const sys = b.qty[loc] || 0;
+      const counted = draft[code];
+      if (counted === sys) return;
+      b.qty[loc] = counted;
+      checkReorder(data, b);
+      changed++;
+      data.log.unshift({ id: uid(), ts, user: who, boardCode: code, action: "count", qtyChange: counted - sys, resultingQty: totalQty(b), reason: `Stock count (${loc}): system ${sys} → counted ${counted}` });
+    });
+    if (!data.meta) data.meta = {};
+    if (!data.meta.lastCount) data.meta.lastCount = {};
+    data.meta.lastCount[loc] = { ts, user: who, boards: codes.length };
+    return data;
+  }, null);
+  if (ok){
+    saveCountDraft(loc, {});
+    toast(changed ? `Count applied — ${changed} board(s) corrected at ${loc}.` : `Count applied — everything matched at ${loc}.`, "ok");
+    render();
+  }
+}
+
 /* ---------------- REMOVE QTY ---------------- */
 const REMOVE_REASONS = ["Job allocation","Damaged / waste","Stock take correction","Returned to supplier","Other"];
 function renderRemoveQty(){
@@ -1057,6 +1181,15 @@ function renderRemoveQty(){
       <select id="rq-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(b.code)} — ${esc(b.description)} (total on hand: ${totalQty(b)} ${esc(b.unit)})</option>`).join("")}</select>
       <label>Quantity used / removed</label>
       <input type="number" id="rq-qty" min="1" step="1" placeholder="e.g. 5">
+      <label>Taken by</label>
+      <select id="rq-takenby" onchange="document.getElementById('rq-takenby-other-wrap').style.display=this.value==='__other'?'block':'none'">
+        ${[...new Set((state.sharedUsers||[]).map(u=>u.username).filter(Boolean))].sort((a,b)=>a.localeCompare(b)).map(n=>`<option value="${esc(n)}" ${n===state.currentUser.username?'selected':''}>${esc(n)}</option>`).join("")}
+        <option value="__other">Someone else…</option>
+      </select>
+      <div id="rq-takenby-other-wrap" style="display:none;">
+        <label>Name</label>
+        <input type="text" id="rq-takenby-other" placeholder="Who took the board">
+      </div>
       <label>Reason (required)</label>
       <select id="rq-reason" onchange="document.getElementById('rq-other-wrap').style.display=this.value==='Other'?'block':'none'">
         ${REMOVE_REASONS.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join("")}
@@ -1077,6 +1210,10 @@ async function submitRemoveQty(){
   let reason = document.getElementById("rq-reason").value;
   if (reason === "Other"){ reason = document.getElementById("rq-other").value.trim(); }
   const notes = document.getElementById("rq-notes").value.trim();
+  const takenSel = document.getElementById("rq-takenby");
+  let takenBy = takenSel ? takenSel.value : state.currentUser.username;
+  if (takenBy === "__other"){ takenBy = document.getElementById("rq-takenby-other").value.trim(); }
+  if (!takenBy){ toast("Enter who took the board.", "error"); return; }
   if (!code || !qty || qty <= 0){ toast("Enter a valid quantity.", "error"); return; }
   if (!reason){ toast("A reason is required to remove stock.", "error"); return; }
   const who = state.currentUser.username;
@@ -1092,7 +1229,7 @@ async function submitRemoveQty(){
     checkReorder(data, board);
     // notes kept as its own field (not folded into reason) so the
     // Cutting Log can show it clearly — see renderCuttingLog().
-    data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "remove", qtyChange: -qty, resultingQty: totalQty(board), reason: reason + ` (${location})`, notes });
+    data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "remove", qtyChange: -qty, resultingQty: totalQty(board), reason: reason + ` (${location})`, notes, takenBy });
     return data;
   }, `Removed ${qty} from ${code} at ${location}.`);
   if (ok){ document.getElementById("rq-qty").value = ""; const o = document.getElementById("rq-other"); if(o) o.value = ""; const n = document.getElementById("rq-notes"); if(n) n.value = ""; }
@@ -1404,17 +1541,18 @@ function renderCuttingLog(){
       <p class="small-muted">Every time board stock was removed/used, in one place — separate from the full Activity Log.</p>
       <div style="overflow-x:auto;">
       <table>
-        <thead><tr><th>When</th><th>Board</th><th>User</th><th>Qty used</th><th>Reason</th><th>Notes</th></tr></thead>
+        <thead><tr><th>When</th><th>Board</th><th>Taken by</th><th>Recorded by</th><th>Qty used</th><th>Reason</th><th>Notes</th></tr></thead>
         <tbody>
           ${entries.map(e => `
             <tr>
               <td class="small-muted">${fmtDate(e.ts)}</td>
               <td class="mono">${esc(e.boardCode)}</td>
-              <td>${esc(e.user)}</td>
+              <td><b>${esc(e.takenBy || e.user)}</b></td>
+              <td class="small-muted">${esc(e.user)}</td>
               <td class="qty-minus">${Math.abs(e.qtyChange)}</td>
               <td class="small-muted">${esc(e.reason||'')}</td>
               <td>${esc(e.notes||'—')}</td>
-            </tr>`).join("") || `<tr><td colspan="6" class="empty">Nothing cut/removed yet.</td></tr>`}
+            </tr>`).join("") || `<tr><td colspan="7" class="empty">Nothing cut/removed yet.</td></tr>`}
         </tbody>
       </table>
       </div>
