@@ -125,6 +125,7 @@
 
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
+<script src="https://seanoakjoinery.github.io/oak-core/oak-core.js?v=1"></script>
 <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
@@ -396,24 +397,25 @@ const CONFIG_OK = CONFIG.FIREBASE_CONFIG
 // see dev notes) — this app no longer talks to EmailJS directly at all.
 
 let fb = null, fbRef = null, dispatchBoardRef = null;
+let oak = null;
 if (CONFIG_OK && window.firebase) {
   try {
     fb = firebase.initializeApp(CONFIG.FIREBASE_CONFIG);
     fbRef = firebase.database().ref(CONFIG.DB_PATH);
-    // Shared with the Dispatch/Stock List apps — this is where the
-    // one common users[] roster lives (see SHARED AUTH below). This
-    // app never writes the whole 'dispatchBoard' node, only the
-    // 'users' child, so it can never clobber the dispatch board's
-    // own items/notes/etc.
+    // Still used for dispatchBoard/items (stock→dispatch handoff).
+    // Shared users sync/save now goes through OakCore (see SHARED AUTH).
     dispatchBoardRef = firebase.database().ref("dispatchBoard");
+    if (window.OakCore) {
+      oak = OakCore.createApp({ appId: "boardStock", readOnly: false });
+      oak.init();
+    }
   } catch(e){ console.warn("Firebase init failed:", e); }
 }
 
 /* ============================================================================
+   Oak Core cutover 2026-09-24: users sync/save + hashPin via https://seanoakjoinery.github.io/oak-core/oak-core.js?v=1 — rollback branch backup-before-oak-core-2026-09-24
    SHARED AUTH — same users[]/permissions system as the Dispatch and Stock
-   List apps (per user request: "use the same api and bin as the other
-   apps and the same app permissions"). Login/user-management lives on
-   the shared 'dispatchBoard/users' path; this app's OWN data (boards,
+   List apps. Login/user-management via OakCore; this app's OWN data (boards,
    log, meta) stays at CONFIG.DB_PATH, untouched by any of this.
    ============================================================================ */
 const APP_ID = "boardStock";
@@ -429,21 +431,17 @@ function userHasApp(u, appId){
   if (!u.apps) return true; // legacy account — not yet scoped
   return !!u.apps[appId];
 }
-async function hashPin(pin){
-  const enc = new TextEncoder().encode(pin);
-  const buf = await crypto.subtle.digest("SHA-256", enc);
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-}
-// Writes state.sharedUsers straight to dispatchBoard/users ONLY — a
-// partial-path write, never the whole dispatchBoard node.
+async function hashPin(pin){ return OakCore.hashPin(pin); }
+// Writes state.sharedUsers via OakCore (shared dispatchBoard/users path).
 async function saveSharedUsers(){
-  if (!dispatchBoardRef) return;
-  try { await dispatchBoardRef.child("users").set(state.sharedUsers); } catch(e){ console.warn("Could not save users:", e); }
+  if (!oak) return;
+  try { await oak.saveUsers(state.sharedUsers); }
+  catch(e){ console.warn("Could not save users:", e); }
 }
 function startSharedUsersSync(){
-  if (!dispatchBoardRef) return;
-  dispatchBoardRef.child("users").on("value", (snap) => {
-    state.sharedUsers = Array.isArray(snap.val()) ? snap.val() : [];
+  if (!oak) return;
+  oak.startUsersSync((list) => {
+    state.sharedUsers = Array.isArray(list) ? list : [];
     render();
   });
 }
@@ -810,7 +808,7 @@ function renderLogin(){
       <div style="text-align:center; margin-bottom:8px;">
         <div class="brand-mark" style="margin:0 auto 10px; width:44px; height:44px; font-size:20px;">${esc(initials(state.data.meta.companyName || "BS"))}</div>
         <h1 style="margin:0 0 4px;">${esc(state.data.meta.companyName || CONFIG.APP_TITLE)}</h1>
-        <div class="small-muted">Who's working?</div>
+        <div class="small-muted">Who's working?${window.OakCore && OakCore.VERSION ? (" · oak-core " + OakCore.VERSION) : ""}</div>
       </div>
       ${state.syncError ? `<div class="banner"><span>${esc(state.syncError)}</span></div>` : ""}
       <div class="user-tiles">
