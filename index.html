@@ -125,7 +125,9 @@
 
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
-<script src="https://seanoakjoinery.github.io/oak-core/oak-core.js?v=2"></script>
+<script src="https://seanoakjoinery.github.io/oak-core/oak-core.js?v=3"></script>
+<script>/* ONE LOGIN (oak-core v3): no session on this device -> log in on the Oak Joinery home app first. Add ?local=1 to the URL to use this app's own login screen instead. */
+(function(){try{var S=window.OakCore&&OakCore.session;if(S&&!S.get()&&!S.localLoginAllowed())S.goHome({next:'boardStock'});}catch(e){}})();</script>
 <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
@@ -413,7 +415,7 @@ if (CONFIG_OK && window.firebase) {
 }
 
 /* ============================================================================
-   Oak Core cutover 2026-09-24: users sync/save + hashPin via https://seanoakjoinery.github.io/oak-core/oak-core.js?v=2 — rollback branch backup-before-oak-core-2026-09-24
+   Oak Core cutover 2026-09-24: users sync/save + hashPin via https://seanoakjoinery.github.io/oak-core/oak-core.js?v=3 — rollback branch backup-before-oak-core-2026-09-24
    SHARED AUTH — same users[]/permissions system as the Dispatch and Stock
    List apps. Login/user-management via OakCore; this app's OWN data (boards,
    log, meta) stays at CONFIG.DB_PATH, untouched by any of this.
@@ -432,6 +434,21 @@ function userHasApp(u, appId){
   return !!u.apps[appId];
 }
 async function hashPin(pin){ return OakCore.hashPin(pin); }
+// ===================== ONE LOGIN (oak-core v3) =====================
+// The Oak Joinery home app (/oak-core/) is the one login screen. This app
+// picks up who's logged in on this device; "Menu" goes back home.
+function ssoOn(){ return !!(window.OakCore && OakCore.session); }
+function ssoGoMenu(){ if(ssoOn()) OakCore.session.goHome(); }
+// Returns the logged-in user, or null (and heads home) if there isn't one.
+function ssoResolve(list){
+  if(!ssoOn()) return null;
+  const r = OakCore.session.resolve(list, APP_ID);
+  if(r.status === 'ok') return r.user;
+  if(r.status === 'wait' || OakCore.session.localLoginAllowed()) return null;
+  OakCore.session.goHome(r.status === 'denied' ? { denied: APP_ID } : { next: APP_ID });
+  return null;
+}
+
 // Writes state.sharedUsers via OakCore (shared dispatchBoard/users path).
 async function saveSharedUsers(){
   if (!oak) return;
@@ -442,6 +459,7 @@ function startSharedUsersSync(){
   if (!oak) return;
   oak.startUsersSync((list) => {
     state.sharedUsers = Array.isArray(list) ? list : [];
+    if(!state.currentUser){ const su = ssoResolve(state.sharedUsers); if(su){ state.currentUser = su; state.tab = "stock"; } }
     render();
   });
 }
@@ -686,7 +704,7 @@ function renderWaitingForSetup(){
     <div class="center-screen"><div class="auth-box card">
       <h2>Not set up yet</h2>
       <p class="small-muted">This workshop's board stock hasn't been set up yet. Ask a root user to open ${esc(CONFIG.APP_TITLE)} and finish setup.</p>
-      <button class="btn btn-ghost btn-block" onclick="logout()">Switch user</button>
+      <button class="btn btn-ghost btn-block" onclick="ssoOn() ? ssoGoMenu() : logout()">☰ Menu</button>
     </div></div>`;
 }
 
@@ -832,6 +850,7 @@ async function submitLogin(){
     return;
   }
   state.currentUser = user;
+  if(ssoOn()) OakCore.session.set(user);
   state.loginStep = "pick";
   state.tab = "stock";
   render();
@@ -879,7 +898,7 @@ function renderShell(){
       <div class="topbar-right">
         <div class="brand-wordmark">OAK<span>JOINERY</span></div>
         <div class="who"><b>${esc(state.currentUser.username)}</b><br>${state.currentUser.isRoot ? (isMainRoot(state.currentUser) ? "Main root" : "Root") : "Team member"}</div>
-        <button class="btn btn-ghost btn-sm" onclick="logout()">Log out</button>
+        <button class="btn btn-ghost btn-sm" onclick="ssoOn() ? ssoGoMenu() : logout()">☰ Menu</button>
       </div>
     </div>
     ${state.syncError ? `<div style="max-width:1000px;margin:14px auto 0;padding:0 18px;"><div class="banner"><span>⚠️ ${esc(state.syncError)}</span><button class="btn btn-sm btn-ghost" onclick="retrySync()">Retry</button></div></div>` : ""}
