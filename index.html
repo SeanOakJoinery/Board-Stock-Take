@@ -4,16 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>Board Stock</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
-<link rel="manifest" href="manifest.json">
-<link rel="icon" href="icon-192.png" type="image/png">
-<link rel="apple-touch-icon" href="icon-180.png">
-<meta name="theme-color" content="#1E1C18">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Board Stock">
 
 <!--
   ============================================================================
@@ -48,39 +38,15 @@
   DATA SHAPE (the one JSON object stored at DB_PATH in the database):
   {
     meta: { companyName, reorderEmail, appUrl, setupDone },
-    locations: ["Main", ...],  // root-managed fixed list — see LOCATIONS below
-    boards: [{ code, description, category, unit, qty: {locationName: number, ...}, reorderLevel, reorderNotified }],
+    boards: [{ code, description, category, unit, qty, reorderLevel, reorderNotified }],
+    users: [{ id, name, pin, role: 'root'|'user', active, permissions:{addBoard,addQty,removeQty,viewLog,manageUsers,settings} }],
     log: [{ id, ts, user, boardCode, action, qtyChange, resultingQty, reason }]
   }
-  users[] no longer lives here — see SHARED AUTH further down for why
-  (shared with the Dispatch/Stock List/Consumables apps).
-
-  SEND TO DISPATCH (added 2026-09-22, per user request: "i want a
-  section off sending from...board stock to dispatch"): new tab, gated
-  by boardSendToDispatch. Deducts a board's stock at a chosen location
-  and writes a new Unfinished item directly into the Dispatch app's own
-  'dispatchBoard/items' (same shared Firebase project — see dev notes
-  top of file), carrying recipeSnapshot:[{sourceApp:'boardStock',
-  itemId:code, desc, deductQty, location}] so it's reversible from
-  Dispatch with "Return to stock" (see that app's returnItemToStock,
-  which was generalized the same day to handle boardStock/
-  consumablesStock sources alongside its original stockList one).
-
-  LOCATIONS (added 2026-09-21, per user request: "mark where the boards
-  are sitting like kramaville santon or boksburg... a kramaville section
-  and a boksburg section or wherever else i need it to be"): board.qty
-  changed from a single number to an object keyed by location name.
-  data.locations is root-managed (Settings tab) — addLocation()/
-  removeLocation(). migrateLegacyQty() (called from every place data
-  gets loaded — fetchRemote/startRealtimeSync/boot's cache path)
-  converts any board still using the OLD plain-number qty into the
-  object shape the first time it's seen, crediting the old number to
-  data.locations[0] — nothing is lost on upgrade. totalQty(board) sums
-  across all locations (used for reorder checks and the boards-admin
-  list); qtyAt(board, location) reads one location's amount (used on
-  the Stock tab's per-location sections and in Add/Remove stock).
 
   Known limits (be upfront with the client about these if asked):
+  - PINs are stored as plain text in the database. Fine for an internal
+    workshop tool behind a private link, not meant for anything more
+    sensitive.
   - The database rules are open (".read"/".write": true) since there's no
     Firebase Auth — anyone with the Firebase config values (visible in this
     file's source) can read/write the data directly, same trust model as the
@@ -94,29 +60,27 @@
 <!-- ====================== ROOT CONFIG — EDIT BEFORE PUBLISHING ====================== -->
 <script>
   const CONFIG = {
-    // Shared with the Dispatch app and Stock List app — same Firebase
-    // project/database (per user request, replacing this app's
-    // originally-separate project). This app's OWN data (boards, log,
-    // meta) still lives at its own DB_PATH below, so it doesn't collide
-    // with 'dispatchBoard' or 'stockList' — only users[] is shared,
-    // read from/written to 'dispatchBoard/users' directly (see SHARED
-    // AUTH section further down).
+    // From the Firebase console: Project settings > General > Your apps > SDK
+    // setup and configuration > Config. Create a Firebase project and a
+    // Realtime Database first (see SETUP.md).
     FIREBASE_CONFIG: {
-      apiKey: "AIzaSyCkoUkLIlxdxD2AAEpLGW4dzqkSeC5lVh0",
-      authDomain: "oak-joinery-stock-dispatch.firebaseapp.com",
-      databaseURL: "https://oak-joinery-stock-dispatch-default-rtdb.europe-west1.firebasedatabase.app",
-      projectId: "oak-joinery-stock-dispatch",
-      storageBucket: "oak-joinery-stock-dispatch.firebasestorage.app",
-      messagingSenderId: "538461584463",
-      appId: "1:538461584463:web:b84319c125e9bf9a47be3a"
+      apiKey: "PASTE_YOUR_FIREBASE_API_KEY_HERE",
+      authDomain: "PASTE_YOUR_PROJECT_ID.firebaseapp.com",
+      databaseURL: "PASTE_YOUR_REALTIME_DATABASE_URL_HERE",
+      projectId: "PASTE_YOUR_PROJECT_ID_HERE",
+      storageBucket: "PASTE_YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "PASTE_YOUR_SENDER_ID_HERE",
+      appId: "PASTE_YOUR_APP_ID_HERE"
     },
-    // Where in the shared database THIS app's own board/log/meta data
-    // lives. Kept separate from 'dispatchBoard' (users + dispatch note
-    // data) and 'stockList' (the other stock app's own items).
+    // Where in the database this app's data lives. Leave as-is unless you
+    // want to run more than one workshop off the same Firebase project.
     DB_PATH: "boardStock",
 
     // From emailjs.com: Email Services > your service ID, Email Templates > your
     // template ID, Account > General > your Public Key.
+    EMAILJS_PUBLIC_KEY: "PASTE_YOUR_EMAILJS_PUBLIC_KEY_HERE",
+    EMAILJS_SERVICE_ID: "PASTE_YOUR_EMAILJS_SERVICE_ID_HERE",
+    EMAILJS_TEMPLATE_ID: "PASTE_YOUR_EMAILJS_TEMPLATE_ID_HERE",
 
     APP_TITLE: "Board Stock"
   };
@@ -125,27 +89,26 @@
 
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
-<script src="https://seanoakjoinery.github.io/oak-core/oak-core.js?v=1"></script>
 <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
 
 <style>
   :root{
-    --bg: #1E1C18;
-    --panel: #26221C;
-    --panel-2: #2E2A22;
-    --border: #433D32;
-    --border-soft: #362F27;
-    --text: #EFE8D8;
-    --text-muted: #9C9280;
-    --amber: #E3A23A;
-    --amber-dim: #EEB055;
-    --amber-bg: rgba(227,162,58,0.14);
-    --green: #5FA776;
-    --green-bg: rgba(95,167,118,0.14);
-    --red: #C1613D;
-    --red-bg: rgba(193,97,61,0.16);
+    --bg: #171513;
+    --panel: #211e1b;
+    --panel-2: #2a2521;
+    --border: #3a332c;
+    --border-soft: #2e2925;
+    --text: #f1eadd;
+    --text-muted: #a89a86;
+    --amber: #d38a3f;
+    --amber-dim: #8a5a29;
+    --amber-bg: rgba(211,138,63,0.14);
+    --green: #7bab5e;
+    --green-bg: rgba(123,171,94,0.14);
+    --red: #c1502e;
+    --red-bg: rgba(193,80,46,0.16);
     --radius: 10px;
     --radius-lg: 16px;
     --shadow: 0 8px 24px rgba(0,0,0,0.35);
@@ -155,7 +118,7 @@
   body{
     margin:0;
     background:
-      radial-gradient(1200px 600px at 100% -10%, rgba(227,162,58,0.08), transparent 60%),
+      radial-gradient(1200px 600px at 100% -10%, rgba(211,138,63,0.08), transparent 60%),
       var(--bg);
     color:var(--text);
     font-family:'Inter',system-ui,sans-serif;
@@ -174,8 +137,8 @@
   }
   .btn:hover{border-color:var(--amber-dim);}
   .btn:active{transform:translateY(1px);}
-  .btn-primary{background:var(--amber); border-color:var(--amber); color:#241a08;}
-  .btn-primary:hover{background:var(--amber-dim);}
+  .btn-primary{background:var(--amber); border-color:var(--amber); color:#1c1408;}
+  .btn-primary:hover{background:#e09a52;}
   .btn-danger{background:var(--red); border-color:var(--red); color:#fff0ea;}
   .btn-ghost{background:transparent; border-color:var(--border);}
   .btn-block{width:100%;}
@@ -211,9 +174,7 @@
     border-bottom:1px solid var(--border-soft); padding:14px 18px; display:flex; align-items:center; justify-content:space-between; gap:10px;
   }
   .brand{font-size:18px; font-weight:700; letter-spacing:.2px; display:flex; align-items:center; gap:10px;}
-  .brand-mark{width:28px; height:28px; border-radius:8px; background:linear-gradient(135deg,var(--amber),var(--amber-dim)); display:flex; align-items:center; justify-content:center; font-size:15px; color:#241a08; font-weight:800;}
-  .brand-wordmark{font-size:13px; font-weight:600; letter-spacing:.12em; line-height:1.25; text-align:right; color:var(--text);}
-  .brand-wordmark span{display:block; font-weight:400; font-size:9px; letter-spacing:.2em; color:var(--amber);}
+  .brand-mark{width:28px; height:28px; border-radius:8px; background:linear-gradient(135deg,var(--amber),#8a5a29); display:flex; align-items:center; justify-content:center; font-size:15px; color:#1c1408; font-weight:800;}
   .topbar-right{display:flex; align-items:center; gap:10px;}
   .who{font-size:13px; color:var(--text-muted); text-align:right; line-height:1.3;}
   .who b{color:var(--text);}
@@ -253,11 +214,6 @@
   .stat .l{font-size:12px; color:var(--text-muted);}
 
   .board-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:12px;}
-  .location-section{margin-bottom:20px;}
-  .location-section summary{cursor:pointer; font-size:16px; font-weight:700; padding:10px 0; border-bottom:1px solid var(--border); margin-bottom:12px; list-style:none;}
-  .location-section summary::-webkit-details-marker{display:none;}
-  .location-section summary::before{content:"▸ "; color:var(--amber);}
-  .location-section[open] summary::before{content:"▾ "; color:var(--amber);}
   .board-card{background:var(--panel); border:1px solid var(--border-soft); border-radius:var(--radius-lg); padding:16px; display:flex; flex-direction:column; gap:8px; position:relative;}
   .board-card.reorder{border-color:var(--red);}
   .board-code{font-size:12px; color:var(--amber); letter-spacing:.4px;}
@@ -369,21 +325,13 @@ const DEFAULT_BOARDS = [
   code, description, category, unit, qty, reorderLevel: 5, reorderNotified: false
 }));
 
-// Namespaced ("board...") per user request to share the SAME users[] /
-// permissions object as the Dispatch and Stock List apps (one shared
-// roster, one Manage Users screen) — unprefixed keys here would clash
-// with similarly-named permissions in those apps. manageUsers is the
-// one exception: it's the same concept (can edit the shared roster)
-// everywhere, so it's intentionally NOT namespaced.
 const PERMISSIONS = [
-  { key:"boardAddBoard",   label:"Add Boards",     icon:"➕" },
-  { key:"boardAddQty",     label:"Add Stock",      icon:"📥" },
-  { key:"boardRemoveQty",  label:"Remove Stock",   icon:"📤" },
-  { key:"boardSendToDispatch", label:"Send to Dispatch", icon:"🚚" },
-  { key:"boardExportData", label:"Export stock report", icon:"📄" },
-  { key:"boardViewLog",    label:"Activity Log",   icon:"📋" },
-  { key:"manageUsers",     label:"Manage Users",   icon:"👤" },
-  { key:"boardSettings",   label:"App Settings",   icon:"⚙️" },
+  { key:"addBoard",   label:"Add Boards",     icon:"➕" },
+  { key:"addQty",     label:"Add Stock",      icon:"📥" },
+  { key:"removeQty",  label:"Remove Stock",   icon:"📤" },
+  { key:"viewLog",    label:"Activity Log",   icon:"📋" },
+  { key:"manageUsers",label:"Manage Users",   icon:"👤" },
+  { key:"settings",   label:"App Settings",   icon:"⚙️" },
 ];
 function blankPermissions(val){
   const p = {}; PERMISSIONS.forEach(x => p[x.key] = val); return p;
@@ -393,68 +341,28 @@ const CACHE_KEY = "boardstock_cache_v1";
 const CONFIG_OK = CONFIG.FIREBASE_CONFIG
                  && CONFIG.FIREBASE_CONFIG.apiKey && !CONFIG.FIREBASE_CONFIG.apiKey.startsWith("PASTE_")
                  && CONFIG.FIREBASE_CONFIG.databaseURL && !CONFIG.FIREBASE_CONFIG.databaseURL.startsWith("PASTE_");
-// Email sending moved server-side (weekly digest via GitHub Actions,
-// see dev notes) — this app no longer talks to EmailJS directly at all.
+const EMAIL_OK = CONFIG.EMAILJS_PUBLIC_KEY && !CONFIG.EMAILJS_PUBLIC_KEY.startsWith("PASTE_")
+                 && CONFIG.EMAILJS_SERVICE_ID && !CONFIG.EMAILJS_SERVICE_ID.startsWith("PASTE_")
+                 && CONFIG.EMAILJS_TEMPLATE_ID && !CONFIG.EMAILJS_TEMPLATE_ID.startsWith("PASTE_");
 
-let fb = null, fbRef = null, dispatchBoardRef = null;
-let oak = null;
+if (EMAIL_OK && window.emailjs) { emailjs.init({ publicKey: CONFIG.EMAILJS_PUBLIC_KEY }); }
+
+let fb = null, fbRef = null;
 if (CONFIG_OK && window.firebase) {
   try {
     fb = firebase.initializeApp(CONFIG.FIREBASE_CONFIG);
     fbRef = firebase.database().ref(CONFIG.DB_PATH);
-    // Still used for dispatchBoard/items (stock→dispatch handoff).
-    // Shared users sync/save now goes through OakCore (see SHARED AUTH).
-    dispatchBoardRef = firebase.database().ref("dispatchBoard");
-    if (window.OakCore) {
-      oak = OakCore.createApp({ appId: "boardStock", readOnly: false });
-      oak.init();
-    }
   } catch(e){ console.warn("Firebase init failed:", e); }
-}
-
-/* ============================================================================
-   Oak Core cutover 2026-09-24: users sync/save + hashPin via https://seanoakjoinery.github.io/oak-core/oak-core.js?v=1 — rollback branch backup-before-oak-core-2026-09-24
-   SHARED AUTH — same users[]/permissions system as the Dispatch and Stock
-   List apps. Login/user-management via OakCore; this app's OWN data (boards,
-   log, meta) stays at CONFIG.DB_PATH, untouched by any of this.
-   ============================================================================ */
-const APP_ID = "boardStock";
-const APP_LABELS = { dispatch: "Dispatch app", stock: "Stock List app", boardStock: "Board Stock app", consumables: "Consumables app" };
-function defaultApps(){ return { dispatch: true, stock: true, boardStock: true, consumables: true }; }
-function getMainRoot(){ return state.sharedUsers.find(u => u.isMainRoot) || state.sharedUsers.find(u => u.isRoot) || null; }
-function isMainRoot(u){ const mr = getMainRoot(); return !!(u && mr && u.id === mr.id); }
-function currentUserIsMainRoot(){ return isMainRoot(state.currentUser); }
-function userHasApp(u, appId){
-  appId = appId || APP_ID;
-  if (!u) return false;
-  if (isMainRoot(u)) return true;
-  if (!u.apps) return true; // legacy account — not yet scoped
-  return !!u.apps[appId];
-}
-async function hashPin(pin){ return OakCore.hashPin(pin); }
-// Writes state.sharedUsers via OakCore (shared dispatchBoard/users path).
-async function saveSharedUsers(){
-  if (!oak) return;
-  try { await oak.saveUsers(state.sharedUsers); }
-  catch(e){ console.warn("Could not save users:", e); }
-}
-function startSharedUsersSync(){
-  if (!oak) return;
-  oak.startUsersSync((list) => {
-    state.sharedUsers = Array.isArray(list) ? list : [];
-    render();
-  });
 }
 
 /* ============================================================================
    STATE
    ============================================================================ */
 let state = {
-  data: null,            // the full synced object (this app's OWN data: meta/boards/log)
+  data: null,            // the full synced object
   loaded: false,
   syncError: null,
-  sharedUsers: [],       // synced live from dispatchBoard/users — shared with Dispatch/Stock List
-  currentUser: null,     // an entry from sharedUsers: {id,username,pin,isRoot,isMainRoot,apps,permissions}
+  currentUser: null,     // {id,name,role,permissions}
   loginStep: "pick",     // 'pick' | 'pin'
   loginUserId: null,
   loginError: "",
@@ -484,8 +392,7 @@ async function fetchRemote(){
   const val = snapshot.val();
   if (!val) return null;
   // Firebase drops empty arrays/objects, so make sure the shape stays intact.
-  // NOTE: users no longer lives here — see SHARED AUTH / sharedUsers.
-  return migrateLegacyQty({ meta: val.meta || {}, boards: val.boards || [], log: val.log || [], locations: val.locations || [], suppliers: val.suppliers || {} });
+  return { meta: val.meta || {}, boards: val.boards || [], users: val.users || [], log: val.log || [] };
 }
 async function saveRemote(data){
   if (!fbRef) throw new Error("Not connected to Firebase.");
@@ -493,42 +400,12 @@ async function saveRemote(data){
 }
 
 function emptyData(){
-  return { meta: { companyName:"", reorderEmail:"", appUrl:"", setupDone:false }, boards: [], log: [], locations: ["Main"], suppliers: {} };
-}
-
-// --- LOCATIONS (added 2026-09-21, per user request: "mark where the
-// boards are sitting like kramaville santon or boksburg... a kramaville
-// section and a boksburg section or wherever else i need it to be") ---
-// board.qty changed from a single number to an object keyed by location
-// name: { "Kramerville": 20, "Boksburg": 15 }. data.locations is the
-// root-managed fixed list (per user request — not free-text per board).
-// migrateLegacyQty() below converts any board still using the OLD plain-
-// number qty (from before this change) into the object shape the first
-// time it's seen, crediting the old number to the first location in the
-// list — nothing is lost on upgrade.
-function totalQty(board){
-  if(typeof board.qty === 'number') return board.qty; // not yet migrated
-  return Object.values(board.qty || {}).reduce((a,b)=>a+(Number(b)||0), 0);
-}
-function qtyAt(board, location){
-  if(typeof board.qty === 'number') return location === (state.data.locations||["Main"])[0] ? board.qty : 0;
-  return (board.qty && board.qty[location]) || 0;
-}
-function migrateLegacyQty(data){
-  if(!data.locations || data.locations.length === 0) data.locations = ["Main"];
-  const firstLoc = data.locations[0];
-  (data.boards||[]).forEach(b => {
-    if(typeof b.qty === 'number'){
-      b.qty = { [firstLoc]: b.qty };
-    }
-  });
-  return data;
+  return { meta: { companyName:"", reorderEmail:"", appUrl:"", setupDone:false }, boards: [], users: [], log: [] };
 }
 
 function boot(){
-  startSharedUsersSync();
   const cached = loadCache();
-  if (cached) { state.data = migrateLegacyQty(cached); state.loaded = true; render(); }
+  if (cached) { state.data = cached; state.loaded = true; render(); }
 
   if (!CONFIG_OK){
     state.syncError = "This app isn't connected to a stock database yet — the Firebase details in the file's CONFIG block still need to be filled in.";
@@ -556,7 +433,7 @@ function startRealtimeSync(bootTimeout){
   fbRef.on("value", (snapshot) => {
     if (bootTimeout) { clearTimeout(bootTimeout); bootTimeout = null; }
     const val = snapshot.val();
-    const remote = val ? migrateLegacyQty({ meta: val.meta || {}, boards: val.boards || [], log: val.log || [], locations: val.locations || [], suppliers: val.suppliers || {} }) : null;
+    const remote = val ? { meta: val.meta || {}, boards: val.boards || [], users: val.users || [], log: val.log || [] } : null;
     if (remote && remote.meta && remote.meta.setupDone !== undefined) {
       state.data = remote;
       saveCache(state.data);
@@ -601,22 +478,31 @@ async function mutate(mutatorFn, successMsg){
 }
 
 /* ============================================================================
-   REORDER TRACKING
+   REORDER EMAIL
    ============================================================================ */
-// Per user request, this no longer sends an email itself the instant
-// something crosses its reorder level — that's now handled by a
-// separate weekly scheduled digest (see the GitHub Actions workflow +
-// weekly-reorder-report.js), which reads this same Firebase data
-// directly and sends one email per supplier every Monday morning.
-// reorderNotified is kept only as harmless historical bookkeeping —
-// nothing reads it anymore.
 async function checkReorder(data, board){
-  const low = totalQty(board) <= board.reorderLevel;
+  const low = board.qty <= board.reorderLevel;
   if (low && !board.reorderNotified){
     board.reorderNotified = true;
+    sendReorderEmail(data, board); // fire and forget — don't block the save
   } else if (!low && board.reorderNotified){
     board.reorderNotified = false;
   }
+}
+function sendReorderEmail(data, board){
+  if (!EMAIL_OK || !window.emailjs){ return; }
+  const to = data.meta.reorderEmail;
+  if (!to){ return; }
+  emailjs.send(CONFIG.EMAILJS_SERVICE_ID, CONFIG.EMAILJS_TEMPLATE_ID, {
+    to_email: to,
+    company_name: data.meta.companyName || "Workshop",
+    board_code: board.code,
+    board_description: board.description,
+    board_category: board.category || "",
+    board_unit: board.unit,
+    current_qty: String(board.qty),
+    reorder_level: String(board.reorderLevel),
+  }).catch(err => console.warn("Reorder email failed:", err));
 }
 
 /* ============================================================================
@@ -637,15 +523,9 @@ function toast(msg, kind){
   root.appendChild(el);
   setTimeout(() => el.remove(), 3200);
 }
-// activeUsers() removed — the shared roster has no per-app "active" flag;
-// app access is controlled entirely by userHasApp()/apps{} instead.
+function activeUsers(data){ return data.users.filter(u => u.active !== false); }
 function findBoard(data, code){ return data.boards.find(b => b.code === code); }
-function can(perm){
-  const u = state.currentUser;
-  if (!u) return false;
-  if (u.isRoot) return true;
-  return !!(u.permissions && u.permissions[perm]);
-}
+function can(perm){ return state.currentUser && (state.currentUser.role === "root" || state.currentUser.permissions[perm]); }
 
 function openModal(html){
   const root = document.getElementById("modal-root");
@@ -659,35 +539,17 @@ function closeModal(){ document.getElementById("modal-root").innerHTML = ""; }
 function render(){
   const app = document.getElementById("app");
   if (!state.loaded){ app.innerHTML = `<div class="center-screen"><div class="small-muted">Loading…</div></div>`; return; }
+
+  if (CONFIG_OK && (!state.data.meta || !state.data.meta.setupDone)){
+    app.innerHTML = renderSetup(); return;
+  }
   if (!CONFIG_OK){
     app.innerHTML = renderNotConfigured(); return;
-  }
-  // Root/login now comes from the SHARED roster (dispatchBoard/users),
-  // not this app's own data — so an empty roster here means genuinely
-  // nobody has ever set up ANY of the four apps yet, not just this one.
-  if (state.sharedUsers.length === 0){
-    app.innerHTML = renderCreateRootAccount(); return;
   }
   if (!state.currentUser){
     app.innerHTML = renderLogin(); return;
   }
-  // This app's OWN data (boards/log/meta) is separate from login and
-  // still needs its own one-time setup even once shared accounts exist
-  // (e.g. someone already set up the Dispatch app first).
-  if (!state.data.meta || !state.data.meta.setupDone){
-    app.innerHTML = state.currentUser.isRoot ? renderWorkshopSetup() : renderWaitingForSetup();
-    return;
-  }
   app.innerHTML = renderShell();
-}
-
-function renderWaitingForSetup(){
-  return `
-    <div class="center-screen"><div class="auth-box card">
-      <h2>Not set up yet</h2>
-      <p class="small-muted">This workshop's board stock hasn't been set up yet. Ask a root user to open ${esc(CONFIG.APP_TITLE)} and finish setup.</p>
-      <button class="btn btn-ghost btn-block" onclick="logout()">Switch user</button>
-    </div></div>`;
 }
 
 function renderNotConfigured(){
@@ -699,57 +561,30 @@ function renderNotConfigured(){
     </div></div>`;
 }
 
-/* ---------------- ROOT ACCOUNT CREATION (shared roster, first run only) ---------------- */
-// Runs when dispatchBoard/users is completely empty — i.e. nobody has
-// set up ANY of the four apps yet. Same shape/behaviour as the
-// Dispatch and Stock List apps' createRootAccount(), so whichever app
-// someone opens first, the result is the same one shared main root.
-function renderCreateRootAccount(){
+/* ---------------- SETUP WIZARD (first run only) ---------------- */
+function renderSetup(){
   return `
     <div class="center-screen"><div class="auth-box card">
-      <h2>Set up root account</h2>
-      <p class="small-muted">First time opening any of the Oak Joinery apps. Create the main account — it has full access to everything and can add other users afterwards.</p>
-      <div class="stack">
-        <div>
-          <label>Username</label>
-          <input type="text" id="su-name" placeholder="e.g. Sean">
-        </div>
-        <div>
-          <label>PIN (at least 4 characters)</label>
-          <input type="password" id="su-pin" placeholder="••••">
-        </div>
-        <div id="su-error" class="small-muted" style="color:#e17e5b;"></div>
-        <button class="btn btn-primary btn-block" onclick="submitCreateRootAccount()" ${state.busy?"disabled":""}>${state.busy?"Creating…":"Create root account"}</button>
-      </div>
-    </div></div>`;
-}
-async function submitCreateRootAccount(){
-  const username = document.getElementById("su-name").value.trim();
-  const pin = document.getElementById("su-pin").value;
-  const err = document.getElementById("su-error");
-  if (!username || !pin){ err.textContent = "Username and PIN are required."; return; }
-  if (pin.length < 4){ err.textContent = "PIN must be at least 4 characters."; return; }
-  err.textContent = "";
-  state.busy = true; render();
-  const rootUser = { id: uid(), username, pin: await hashPin(pin), isRoot: true, isMainRoot: true, permissions: blankPermissions(true), apps: defaultApps() };
-  state.sharedUsers = [rootUser];
-  await saveSharedUsers();
-  state.busy = false;
-  // The live listener will also pick this up, but set it directly too
-  // so the very next render() doesn't flash back to this same screen.
-  render();
-}
-
-/* ---------------- WORKSHOP DATA SETUP (this app's own data, separate from login) ---------------- */
-function renderWorkshopSetup(){
-  return `
-    <div class="center-screen"><div class="auth-box card">
-      <h2>Set up this workshop</h2>
-      <p class="small-muted">This runs once for ${esc(CONFIG.APP_TITLE)}. It loads your starting board list (${DEFAULT_BOARDS.length} boards from your stock sheet). Logins are already shared with your other Oak Joinery apps.</p>
+      <h2>Set up your workshop</h2>
+      <p class="small-muted">This runs once. It creates your Root login and loads your starting board list (${DEFAULT_BOARDS.length} boards from your stock sheet).</p>
       <div class="stack">
         <div>
           <label>Company / workshop name</label>
           <input type="text" id="su-company" placeholder="e.g. Oak Joinery (Pty) Ltd">
+        </div>
+        <div>
+          <label>Your name (Root user)</label>
+          <input type="text" id="su-name" placeholder="e.g. Devaris">
+        </div>
+        <div class="field-row">
+          <div>
+            <label>Choose a PIN (4–6 digits)</label>
+            <input type="password" inputmode="numeric" pattern="[0-9]*" id="su-pin" maxlength="6" placeholder="••••">
+          </div>
+          <div>
+            <label>Confirm PIN</label>
+            <input type="password" inputmode="numeric" pattern="[0-9]*" id="su-pin2" maxlength="6" placeholder="••••">
+          </div>
         </div>
         <div>
           <label>Reorder alert email</label>
@@ -757,45 +592,44 @@ function renderWorkshopSetup(){
           <div class="helptext">Sent an email whenever a board's stock drops to its reorder level. You can change this later in Settings.</div>
         </div>
         <div id="su-error" class="small-muted" style="color:#e17e5b;"></div>
-        <button class="btn btn-primary btn-block" onclick="submitWorkshopSetup()" ${state.busy?"disabled":""}>${state.busy?"Setting up…":"Set up this app"}</button>
+        <button class="btn btn-primary btn-block" onclick="submitSetup()" ${state.busy?"disabled":""}>${state.busy?"Setting up…":"Create workshop"}</button>
       </div>
     </div></div>`;
 }
-async function submitWorkshopSetup(){
+async function submitSetup(){
   const company = document.getElementById("su-company").value.trim();
+  const name = document.getElementById("su-name").value.trim();
+  const pin = document.getElementById("su-pin").value.trim();
+  const pin2 = document.getElementById("su-pin2").value.trim();
   const email = document.getElementById("su-email").value.trim();
-  const who = state.currentUser.username;
+  const err = document.getElementById("su-error");
+  if (!name || !pin){ err.textContent = "Name and PIN are required."; return; }
+  if (!/^[0-9]{4,6}$/.test(pin)){ err.textContent = "PIN must be 4–6 digits."; return; }
+  if (pin !== pin2){ err.textContent = "PINs don't match."; return; }
+  err.textContent = "";
 
   const ok = await mutate((data) => {
     data.meta = { companyName: company, reorderEmail: email, appUrl: window.location.href, setupDone: true };
-    if(!data.locations || data.locations.length === 0) data.locations = ["Main"];
-    const firstLoc = data.locations[0];
-    data.boards = DEFAULT_BOARDS.map(b => ({...b, qty: { [firstLoc]: b.qty }}));
-    data.log = [{ id: uid(), ts: new Date().toISOString(), user: who, boardCode: "-", action: "setup", qtyChange: 0, resultingQty: 0, reason: "Workshop set up" }];
+    data.boards = DEFAULT_BOARDS.map(b => ({...b}));
+    data.users = [{ id: uid(), name, pin, role: "root", active: true, permissions: blankPermissions(true) }];
+    data.log = [{ id: uid(), ts: new Date().toISOString(), user: name, boardCode: "-", action: "setup", qtyChange: 0, resultingQty: 0, reason: "Workshop set up" }];
     return data;
   }, "Workshop created.");
   if (ok) render();
 }
 
-/* ---------------- LOGIN (shared roster, filtered to this app) ---------------- */
+/* ---------------- LOGIN ---------------- */
 function renderLogin(){
-  const users = state.sharedUsers.filter(u => userHasApp(u));
-  if (users.length === 0){
-    return `
-      <div class="center-screen"><div class="auth-box card">
-        <h2>No access</h2>
-        <p class="small-muted">No account on this board has been given access to ${esc(CONFIG.APP_TITLE)}. Ask the main root account to grant access under Manage Users.</p>
-      </div></div>`;
-  }
+  const users = activeUsers(state.data);
   if (state.loginStep === "pin"){
     const user = users.find(u => u.id === state.loginUserId);
     return `
       <div class="center-screen"><div class="auth-box card">
         <button class="btn btn-ghost btn-sm" onclick="state.loginStep='pick'; state.loginError=''; render()">← Back</button>
         <div style="text-align:center; margin:18px 0;">
-          <div class="tile-avatar" style="margin:0 auto 10px;">${esc(initials(user?.username))}</div>
-          <h2 style="margin:4px 0 0;">${esc(user?.username || "")}</h2>
-          <div class="small-muted">${user?.isRoot ? (isMainRoot(user) ? "Main root" : "Root") : "Team member"}</div>
+          <div class="tile-avatar" style="margin:0 auto 10px;">${esc(initials(user?.name))}</div>
+          <h2 style="margin:4px 0 0;">${esc(user?.name || "")}</h2>
+          <div class="small-muted">${user?.role === "root" ? "Root user" : "Team member"}</div>
         </div>
         <label>Enter PIN</label>
         <input type="password" inputmode="numeric" pattern="[0-9]*" id="login-pin" maxlength="6" placeholder="••••" autofocus onkeydown="if(event.key==='Enter') submitLogin()">
@@ -808,24 +642,24 @@ function renderLogin(){
       <div style="text-align:center; margin-bottom:8px;">
         <div class="brand-mark" style="margin:0 auto 10px; width:44px; height:44px; font-size:20px;">${esc(initials(state.data.meta.companyName || "BS"))}</div>
         <h1 style="margin:0 0 4px;">${esc(state.data.meta.companyName || CONFIG.APP_TITLE)}</h1>
-        <div class="small-muted">Who's working?${window.OakCore && OakCore.VERSION ? (" · oak-core " + OakCore.VERSION) : ""}</div>
+        <div class="small-muted">Who's working?</div>
       </div>
       ${state.syncError ? `<div class="banner"><span>${esc(state.syncError)}</span></div>` : ""}
       <div class="user-tiles">
         ${users.map(u => `
           <button class="tile" onclick="state.loginStep='pin'; state.loginUserId='${u.id}'; state.loginError=''; render(); setTimeout(()=>document.getElementById('login-pin')?.focus(),50)">
-            <div class="tile-avatar">${esc(initials(u.username))}</div>
-            <div class="tile-name">${esc(u.username)}</div>
-            <div class="tile-role">${u.isRoot ? "Root" : "Team"}</div>
+            <div class="tile-avatar">${esc(initials(u.name))}</div>
+            <div class="tile-name">${esc(u.name)}</div>
+            <div class="tile-role">${u.role === "root" ? "Root" : "Team"}</div>
           </button>`).join("")}
+        ${users.length === 0 ? `<div class="empty">No users yet.</div>` : ""}
       </div>
     </div></div>`;
 }
-async function submitLogin(){
-  const pin = document.getElementById("login-pin").value;
-  const user = state.sharedUsers.find(u => u.id === state.loginUserId);
-  const enteredHash = await hashPin(pin);
-  if (!user || enteredHash !== user.pin){
+function submitLogin(){
+  const pin = document.getElementById("login-pin").value.trim();
+  const user = state.data.users.find(u => u.id === state.loginUserId);
+  if (!user || user.pin !== pin){
     state.loginError = "Incorrect PIN — try again.";
     render();
     setTimeout(()=>document.getElementById("login-pin")?.focus(), 50);
@@ -837,24 +671,18 @@ async function submitLogin(){
   render();
 }
 function logout(){
-  state.currentUser = null; state.loginUserId = null; state.loginError = "";
-  if (!state.data || !state.data.meta) state.data = emptyData();
-  render();
+  state.currentUser = null; state.loginUserId = null; state.loginError = ""; render();
 }
 
 /* ---------------- APP SHELL ---------------- */
 function visibleTabs(){
   const tabs = [{ key:"stock", label:"Stock", icon:"🪵" }];
-  if (can("boardAddQty")) tabs.push({ key:"addqty", label:"Add", icon:"📥" });
-  if (can("boardRemoveQty")) tabs.push({ key:"removeqty", label:"Remove", icon:"📤" });
-  if (can("boardAddQty") && can("boardRemoveQty")) tabs.push({ key:"count", label:"Stock Count", icon:"🔢" });
-  if (can("boardSendToDispatch")) tabs.push({ key:"dispatch", label:"Send to Dispatch", icon:"🚚" });
-  if (can("boardAddBoard")) tabs.push({ key:"boards", label:"Boards", icon:"➕" });
-  if (can("boardViewLog")) tabs.push({ key:"log", label:"Log", icon:"📋" });
-  if (can("boardViewLog")) tabs.push({ key:"cuttinglog", label:"Cutting Log", icon:"✂️" });
+  if (can("addQty")) tabs.push({ key:"addqty", label:"Add", icon:"📥" });
+  if (can("removeQty")) tabs.push({ key:"removeqty", label:"Remove", icon:"📤" });
+  if (can("addBoard")) tabs.push({ key:"boards", label:"Boards", icon:"➕" });
+  if (can("viewLog")) tabs.push({ key:"log", label:"Log", icon:"📋" });
   if (can("manageUsers")) tabs.push({ key:"users", label:"Users", icon:"👤" });
-  if (can("boardSettings")) tabs.push({ key:"settings", label:"Settings", icon:"⚙️" });
-  if (can("boardSettings")) tabs.push({ key:"suppliers", label:"Suppliers", icon:"🚚" });
+  if (can("settings")) tabs.push({ key:"settings", label:"Settings", icon:"⚙️" });
   return tabs;
 }
 function renderShell(){
@@ -864,21 +692,16 @@ function renderShell(){
   if (state.tab === "stock") content = renderStock();
   else if (state.tab === "addqty") content = renderAddQty();
   else if (state.tab === "removeqty") content = renderRemoveQty();
-  else if (state.tab === "count") content = renderStockCount();
-  else if (state.tab === "dispatch") content = renderSendToDispatch();
   else if (state.tab === "boards") content = renderBoardsAdmin();
   else if (state.tab === "log") content = renderLog();
-  else if (state.tab === "cuttinglog") content = renderCuttingLog();
   else if (state.tab === "users") content = renderUsers();
   else if (state.tab === "settings") content = renderSettings();
-  else if (state.tab === "suppliers") content = renderSuppliersTab();
 
   return `
     <div class="topbar">
       <div class="brand"><div class="brand-mark">${esc(initials(state.data.meta.companyName||"BS"))}</div>${esc(state.data.meta.companyName || CONFIG.APP_TITLE)}</div>
       <div class="topbar-right">
-        <div class="brand-wordmark">OAK<span>JOINERY</span></div>
-        <div class="who"><b>${esc(state.currentUser.username)}</b><br>${state.currentUser.isRoot ? (isMainRoot(state.currentUser) ? "Main root" : "Root") : "Team member"}</div>
+        <div class="who"><b>${esc(state.currentUser.name)}</b><br>${state.currentUser.role === "root" ? "Root" : "Team member"}</div>
         <button class="btn btn-ghost btn-sm" onclick="logout()">Log out</button>
       </div>
     </div>
@@ -897,40 +720,11 @@ async function retrySync(){
 /* ---------------- STOCK (on hand) ---------------- */
 function renderStock(){
   const q = state.boardSearch.toLowerCase();
-  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
-  const allBoards = state.data.boards
+  const boards = state.data.boards
     .filter(b => !q || b.code.toLowerCase().includes(q) || b.description.toLowerCase().includes(q) || (b.category||"").toLowerCase().includes(q))
     .sort((a,b) => a.code.localeCompare(b.code));
   const total = state.data.boards.length;
-  const low = state.data.boards.filter(b => totalQty(b) <= b.reorderLevel).length;
-
-  // Sectioned by location per user request ("i want a kramaville section
-  // and a boksburg section or wherever else i need it to be") — each
-  // section is the same board list, but showing that location's own
-  // quantity. The overall reorder check above still uses the TOTAL
-  // across all locations, since "need reordering" is about the board
-  // type overall, not any one site.
-  const sectionsHtml = locations.map((loc, i) => `
-    <details class="location-section" ${i===0 ? 'open' : ''}>
-      <summary>${esc(loc)} <span class="small-muted">(${allBoards.length} board${allBoards.length===1?'':'s'})</span></summary>
-      <div class="board-grid">
-        ${allBoards.map(b => {
-          const here = qtyAt(b, loc);
-          const isLow = totalQty(b) <= b.reorderLevel;
-          return `
-          <div class="board-card ${isLow?'reorder':''}">
-            <div class="board-code mono">${esc(b.code)}</div>
-            <div class="board-desc">${esc(b.description)}</div>
-            <div class="board-meta">${esc(b.category||'—')}</div>
-            <div class="board-bottom">
-              <div><span class="big-num">${here}</span> <span class="unit-tag">${esc(b.unit)}</span></div>
-              <span class="badge ${isLow?'badge-reorder':'badge-ok'}"><span class="dot ${isLow?'dot-reorder':'dot-ok'}"></span>${isLow?'Reorder':'OK'}</span>
-            </div>
-            <div class="small-muted">Total ${totalQty(b)} ${esc(b.unit)} · reorder at ${b.reorderLevel}</div>
-          </div>`;
-        }).join("") || `<div class="empty">No boards match "${esc(state.boardSearch)}".</div>`}
-      </div>
-    </details>`).join("");
+  const low = state.data.boards.filter(b => b.qty <= b.reorderLevel).length;
 
   return `
     <div class="stat-row">
@@ -940,81 +734,31 @@ function renderStock(){
     </div>
     <div class="toolbar">
       <input type="text" placeholder="Search by code, name or size…" value="${esc(state.boardSearch)}" oninput="state.boardSearch=this.value; render(); this.focus();">
-      ${can("boardExportData") ? `<button class="btn" id="share-pdf-btn" onclick="generateAndSharePdf()">Print / Share PDF</button>` : ""}
     </div>
-    ${sectionsHtml}`;
-}
-
-/* ---------------- STOCK REPORT PDF (added 2026-09-23, per user request:
-   "is it setup to pull stock levels...on a stock report to hand in to
-   my superiors" — mirrors Stock List's own Print/Share PDF exactly). ---------------- */
-function buildStockPdfBlob(){
-  const { jsPDF } = window.jspdf;
-  const doc = new jsPDF();
-  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
-
-  doc.setFontSize(14);
-  doc.setFont(undefined, "bold");
-  doc.text(state.data.meta.companyName || "Board Stock", 14, 18);
-  doc.setFontSize(16);
-  doc.setFont(undefined, "bold");
-  doc.text("Board Stock Report", 14, 30);
-  doc.setFontSize(9);
-  doc.setFont(undefined, "normal");
-  doc.text("Generated " + new Date().toLocaleString(), 14, 36);
-
-  const boards = [...state.data.boards].sort((a,b)=>a.code.localeCompare(b.code));
-  const rows = boards.map(b => {
-    const total = totalQty(b);
-    const breakdown = locations.map(l => `${l}: ${qtyAt(b,l)}`).join("  ·  ");
-    return [b.code, b.description, b.category || "—", breakdown, `${total} ${b.unit}`, `${b.reorderLevel} ${b.unit}`];
-  });
-  doc.autoTable({
-    startY: 44,
-    head: [["Code", "Description", "Category", "By location", "Total on hand", "Reorder at"]],
-    body: rows,
-    styles: { fontSize: 8, cellPadding: 2 },
-    headStyles: { fillColor: [184, 121, 31] },
-    margin: { left: 14, right: 14 },
-  });
-
-  return doc.output("blob");
-}
-async function generateAndSharePdf(){
-  if(!can("boardExportData")) return;
-  const btn = document.getElementById("share-pdf-btn");
-  const original = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = "Preparing PDF…";
-  try{
-    const blob = buildStockPdfBlob();
-    const file = new File([blob], "board-stock-report.pdf", { type: "application/pdf" });
-    if(navigator.canShare && navigator.canShare({ files: [file] })){
-      await navigator.share({ files: [file], title: "Board Stock Report", text: "Board stock report — " + new Date().toLocaleDateString() });
-    } else {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url; a.download = "board-stock-report.pdf";
-      document.body.appendChild(a); a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }
-  } catch(e){
-    if(e.name !== "AbortError") toast("Could not generate the PDF.", "error");
-  }
-  btn.disabled = false;
-  btn.textContent = original;
+    <div class="board-grid">
+      ${boards.map(b => {
+        const isLow = b.qty <= b.reorderLevel;
+        return `
+        <div class="board-card ${isLow?'reorder':''}">
+          <div class="board-code mono">${esc(b.code)}</div>
+          <div class="board-desc">${esc(b.description)}</div>
+          <div class="board-meta">${esc(b.category||'—')}</div>
+          <div class="board-bottom">
+            <div><span class="big-num">${b.qty}</span> <span class="unit-tag">${esc(b.unit)}</span></div>
+            <span class="badge ${isLow?'badge-reorder':'badge-ok'}"><span class="dot ${isLow?'dot-reorder':'dot-ok'}"></span>${isLow?'Reorder':'OK'}</span>
+          </div>
+          <div class="small-muted">Reorder at ${b.reorderLevel} ${esc(b.unit)}</div>
+        </div>`;
+      }).join("") || `<div class="empty">No boards match "${esc(state.boardSearch)}".</div>`}
+    </div>`;
 }
 
 /* ---------------- ADD QTY ---------------- */
 function renderAddQty(){
   const boards = [...state.data.boards].sort((a,b)=>a.code.localeCompare(b.code));
-  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
   return `
     <div class="card">
       <h2 style="margin-top:0;">Add stock</h2>
-      <label>Location</label>
-      <select id="aq-loc">${locations.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
       <label>Board</label>
       <select id="aq-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(b.code)} — ${esc(b.description)} (${esc(b.category||'—')})</option>`).join("")}</select>
       <label>Quantity received</label>
@@ -1026,168 +770,32 @@ function renderAddQty(){
 }
 async function submitAddQty(){
   const code = document.getElementById("aq-board").value;
-  const location = document.getElementById("aq-loc").value;
   const qty = parseInt(document.getElementById("aq-qty").value, 10);
   const note = document.getElementById("aq-note").value.trim();
   if (!code || !qty || qty <= 0){ toast("Enter a valid quantity.", "error"); return; }
-  const who = state.currentUser.username;
+  const who = state.currentUser.name;
   const ok = await mutate((data) => {
     const board = findBoard(data, code);
     if (!board) throw new Error("That board no longer exists — refresh and try again.");
-    if(typeof board.qty !== 'object') board.qty = {};
-    board.qty[location] = (board.qty[location] || 0) + qty;
+    board.qty += qty;
     checkReorder(data, board);
-    data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "add", qtyChange: qty, resultingQty: totalQty(board), reason: (note || "Stock received") + ` (${location})` });
+    data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "add", qtyChange: qty, resultingQty: board.qty, reason: note || "Stock received" });
     return data;
-  }, `Added ${qty} to ${code} at ${location}.`);
+  }, `Added ${qty} to ${code}.`);
   if (ok){ document.getElementById("aq-qty").value = ""; document.getElementById("aq-note").value = ""; }
-}
-
-
-/* ---------------- STOCK COUNT (2026-09-24) ----------------
-   Walk the racks at one location and type what is physically there.
-   Blank = not counted (left alone). The difference shows as you type;
-   "Apply count" sets every counted board to the counted figure in one
-   save and logs each change as a "count" entry (who, when, before/after).
-   Typed figures are kept on this device until applied, so a count can be
-   interrupted and carried on later. */
-function countDraftKey(loc){ return "boardCountDraft:" + loc; }
-function loadCountDraft(loc){ try { return JSON.parse(localStorage.getItem(countDraftKey(loc)) || "{}"); } catch(e){ return {}; } }
-function saveCountDraft(loc, d){ try { localStorage.setItem(countDraftKey(loc), JSON.stringify(d)); } catch(e){} }
-function countLocation(){
-  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
-  if (!state.countLoc || !locations.includes(state.countLoc)) state.countLoc = locations[0];
-  return state.countLoc;
-}
-function renderStockCount(){
-  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
-  const loc = countLocation();
-  const draft = loadCountDraft(loc);
-  const q = (state.countSearch || "").toLowerCase();
-  const boards = [...state.data.boards].sort((a,b)=>a.code.localeCompare(b.code))
-    .filter(b => !q || `${b.code} ${b.description} ${b.size||''}`.toLowerCase().includes(q));
-  const counted = Object.keys(draft).length;
-  const lastCount = state.data.meta && state.data.meta.lastCount && state.data.meta.lastCount[loc];
-  return `
-    <div class="card">
-      <h2 style="margin-top:0;">Stock count</h2>
-      <p class="small-muted">Count what is physically at the location and type it in. Leave a board blank if you didn't count it. Nothing changes until you press <b>Apply count</b>.${lastCount ? `<br>Last count here: ${fmtDate(lastCount.ts)} by ${esc(lastCount.user)}.` : ''}</p>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;">
-        <div><label>Location</label>
-          <select onchange="state.countLoc=this.value; render();">${locations.map(l=>`<option value="${esc(l)}" ${l===loc?'selected':''}>${esc(l)}</option>`).join("")}</select></div>
-        <div style="flex:1;min-width:200px;"><label>Find</label>
-          <input type="text" placeholder="Search by code or name…" value="${esc(state.countSearch||'')}" oninput="state.countSearch=this.value; render(); this.focus(); this.setSelectionRange(this.value.length,this.value.length);"></div>
-      </div>
-      <div style="overflow-x:auto;margin-top:12px;">
-      <table>
-        <thead><tr><th>Board</th><th>System</th><th>Counted</th><th>Difference</th></tr></thead>
-        <tbody>
-          ${boards.map(b => {
-            const sys = (b.qty && b.qty[loc]) || 0;
-            const has = Object.prototype.hasOwnProperty.call(draft, b.code);
-            const diff = has ? draft[b.code] - sys : null;
-            return `<tr>
-              <td><span class="mono">${esc(b.code)}</span> <span class="small-muted">${esc(b.description)}</span></td>
-              <td>${sys} ${esc(b.unit||'')}</td>
-              <td><input type="number" min="0" step="1" style="width:90px;" value="${has ? draft[b.code] : ''}" oninput="countInput(this, '${esc(b.code)}', ${sys})"></td>
-              <td id="cd-${esc(b.code)}" class="${diff>0?'qty-plus':diff<0?'qty-minus':''}">${diff===null ? '—' : (diff>0?'+':'') + diff}</td>
-            </tr>`;
-          }).join("") || `<tr><td colspan="4" class="empty">No boards match.</td></tr>`}
-        </tbody>
-      </table>
-      </div>
-      <div id="count-summary" class="small-muted" style="margin-top:10px;">${countSummaryText(loc)}</div>
-      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
-        <button class="btn btn-primary" onclick="applyStockCount()" ${state.busy || !counted ? "disabled" : ""}>${state.busy ? "Saving…" : "Apply count"}</button>
-        <button class="btn btn-ghost" onclick="if(confirm('Clear the figures typed for this location?')){ saveCountDraft(countLocation(), {}); render(); }" ${counted ? "" : "disabled"}>Clear</button>
-      </div>
-    </div>`;
-}
-function countSummaryText(loc){
-  const draft = loadCountDraft(loc);
-  let changes = 0;
-  Object.entries(draft).forEach(([code, v]) => {
-    const b = findBoard(state.data, code);
-    if (b && v !== ((b.qty && b.qty[loc]) || 0)) changes++;
-  });
-  const n = Object.keys(draft).length;
-  return n ? `${n} board(s) counted · ${changes} with a difference` : "Nothing counted yet.";
-}
-function countInput(input, code, sys){
-  const loc = countLocation();
-  const draft = loadCountDraft(loc);
-  if (input.value === "") delete draft[code];
-  else draft[code] = Math.max(0, parseInt(input.value, 10) || 0);
-  saveCountDraft(loc, draft);
-  const cell = document.getElementById("cd-" + code);
-  if (cell){
-    const diff = draft[code] === undefined ? null : draft[code] - sys;
-    cell.textContent = diff === null ? "—" : (diff > 0 ? "+" : "") + diff;
-    cell.className = diff > 0 ? "qty-plus" : diff < 0 ? "qty-minus" : "";
-  }
-  const sum = document.getElementById("count-summary");
-  if (sum) sum.textContent = countSummaryText(loc);
-  const applyBtn = [...document.querySelectorAll("button")].find(x => x.textContent.trim() === "Apply count");
-  if (applyBtn) applyBtn.disabled = !Object.keys(draft).length;
-}
-async function applyStockCount(){
-  const loc = countLocation();
-  const draft = loadCountDraft(loc);
-  const codes = Object.keys(draft);
-  if (!codes.length) return;
-  if (!confirm(`Apply the count for ${codes.length} board(s) at ${loc}? Boards with a difference will be set to the counted figure.`)) return;
-  const who = state.currentUser.username;
-  const ts = new Date().toISOString();
-  let changed = 0;
-  const ok = await mutate((data) => {
-    changed = 0;
-    codes.forEach(code => {
-      const b = findBoard(data, code);
-      if (!b) return;
-      if (typeof b.qty !== "object" || b.qty === null) b.qty = {};
-      const sys = b.qty[loc] || 0;
-      const counted = draft[code];
-      if (counted === sys) return;
-      b.qty[loc] = counted;
-      checkReorder(data, b);
-      changed++;
-      data.log.unshift({ id: uid(), ts, user: who, boardCode: code, action: "count", qtyChange: counted - sys, resultingQty: totalQty(b), reason: `Stock count (${loc}): system ${sys} → counted ${counted}` });
-    });
-    if (!data.meta) data.meta = {};
-    if (!data.meta.lastCount) data.meta.lastCount = {};
-    data.meta.lastCount[loc] = { ts, user: who, boards: codes.length };
-    return data;
-  }, null);
-  if (ok){
-    saveCountDraft(loc, {});
-    toast(changed ? `Count applied — ${changed} board(s) corrected at ${loc}.` : `Count applied — everything matched at ${loc}.`, "ok");
-    render();
-  }
 }
 
 /* ---------------- REMOVE QTY ---------------- */
 const REMOVE_REASONS = ["Job allocation","Damaged / waste","Stock take correction","Returned to supplier","Other"];
 function renderRemoveQty(){
   const boards = [...state.data.boards].sort((a,b)=>a.code.localeCompare(b.code));
-  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
   return `
     <div class="card">
       <h2 style="margin-top:0;">Remove stock</h2>
-      <label>Location</label>
-      <select id="rq-loc">${locations.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
       <label>Board</label>
-      <select id="rq-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(b.code)} — ${esc(b.description)} (total on hand: ${totalQty(b)} ${esc(b.unit)})</option>`).join("")}</select>
+      <select id="rq-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(b.code)} — ${esc(b.description)} (on hand: ${b.qty} ${esc(b.unit)})</option>`).join("")}</select>
       <label>Quantity used / removed</label>
       <input type="number" id="rq-qty" min="1" step="1" placeholder="e.g. 5">
-      <label>Taken by</label>
-      <select id="rq-takenby" onchange="document.getElementById('rq-takenby-other-wrap').style.display=this.value==='__other'?'block':'none'">
-        ${[...new Set((state.sharedUsers||[]).map(u=>u.username).filter(Boolean))].sort((a,b)=>a.localeCompare(b)).map(n=>`<option value="${esc(n)}" ${n===state.currentUser.username?'selected':''}>${esc(n)}</option>`).join("")}
-        <option value="__other">Someone else…</option>
-      </select>
-      <div id="rq-takenby-other-wrap" style="display:none;">
-        <label>Name</label>
-        <input type="text" id="rq-takenby-other" placeholder="Who took the board">
-      </div>
       <label>Reason (required)</label>
       <select id="rq-reason" onchange="document.getElementById('rq-other-wrap').style.display=this.value==='Other'?'block':'none'">
         ${REMOVE_REASONS.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join("")}
@@ -1196,224 +804,34 @@ function renderRemoveQty(){
         <label>Please specify</label>
         <input type="text" id="rq-other" placeholder="Reason">
       </div>
-      <label>Notes — what was cut (optional)</label>
-      <textarea id="rq-notes" rows="3" placeholder="e.g. Cut into 4x 600x600 panels for NH Hotel reception desk" style="width:100%;resize:vertical;"></textarea>
       <button class="btn btn-danger btn-block" style="margin-top:18px;" onclick="submitRemoveQty()" ${state.busy?"disabled":""}>${state.busy?"Saving…":"Remove stock"}</button>
     </div>`;
 }
 async function submitRemoveQty(){
   const code = document.getElementById("rq-board").value;
-  const location = document.getElementById("rq-loc").value;
   const qty = parseInt(document.getElementById("rq-qty").value, 10);
   let reason = document.getElementById("rq-reason").value;
   if (reason === "Other"){ reason = document.getElementById("rq-other").value.trim(); }
-  const notes = document.getElementById("rq-notes").value.trim();
-  const takenSel = document.getElementById("rq-takenby");
-  let takenBy = takenSel ? takenSel.value : state.currentUser.username;
-  if (takenBy === "__other"){ takenBy = document.getElementById("rq-takenby-other").value.trim(); }
-  if (!takenBy){ toast("Enter who took the board.", "error"); return; }
   if (!code || !qty || qty <= 0){ toast("Enter a valid quantity.", "error"); return; }
   if (!reason){ toast("A reason is required to remove stock.", "error"); return; }
-  const who = state.currentUser.username;
+  const who = state.currentUser.name;
   const ok = await mutate((data) => {
     const board = findBoard(data, code);
     if (!board) throw new Error("That board no longer exists — refresh and try again.");
-    if(typeof board.qty !== 'object') board.qty = {};
-    const here = board.qty[location] || 0;
-    if (qty > here){
-      if (!confirm(`Only ${here} ${board.unit} on hand at ${location} — remove anyway? Stock will show as negative there.`)) throw new Error("Cancelled — nothing was removed.");
+    if (qty > board.qty){
+      if (!confirm(`Only ${board.qty} ${board.unit} on hand — remove anyway? Stock will show as negative.`)) throw new Error("Cancelled — nothing was removed.");
     }
-    board.qty[location] = here - qty;
+    board.qty -= qty;
     checkReorder(data, board);
-    // notes kept as its own field (not folded into reason) so the
-    // Cutting Log can show it clearly — see renderCuttingLog().
-    data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "remove", qtyChange: -qty, resultingQty: totalQty(board), reason: reason + ` (${location})`, notes, takenBy });
+    data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "remove", qtyChange: -qty, resultingQty: board.qty, reason });
     return data;
-  }, `Removed ${qty} from ${code} at ${location}.`);
-  if (ok){ document.getElementById("rq-qty").value = ""; const o = document.getElementById("rq-other"); if(o) o.value = ""; const n = document.getElementById("rq-notes"); if(n) n.value = ""; }
-}
-
-/* ---------------- SEND TO DISPATCH (added 2026-09-22, per user request:
-   "i want a section off sending from...board stock to dispatch"). Mirrors
-   the Stock List app's own send-to-dispatch/mark-built feature: deducts
-   from a chosen board's stock at a chosen location, and creates a real
-   Unfinished item directly in the Dispatch app's board data (shared
-   Firebase project, 'dispatchBoard/items') carrying a recipeSnapshot so
-   it's reversible from Dispatch with "Return to stock" (see that app's
-   returnItemToStock — recipeSnapshot.sourceApp:'boardStock' is how it
-   knows to credit a board rather than a Stock List item). ---------------- */
-function renderSendToDispatch(){
-  const boards = [...state.data.boards].sort((a,b)=>a.code.localeCompare(b.code));
-  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
-  return `
-    <div class="card">
-      <h2 style="margin-top:0;">Send to Dispatch</h2>
-      <p class="small-muted">Deducts stock here and creates a matching item in the Dispatch app's Unfinished column. Can be undone from there with "Return to stock".</p>
-      <label>Location</label>
-      <select id="sd-loc">${locations.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
-      <label>Board</label>
-      <select id="sd-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(b.code)} — ${esc(b.description)} (total on hand: ${totalQty(b)} ${esc(b.unit)})</option>`).join("")}</select>
-      <label>Quantity</label>
-      <input type="number" id="sd-qty" min="1" step="1" value="1">
-      <label>Reference / job</label>
-      <input type="text" id="sd-ref" placeholder="e.g. NH Hotel">
-      <button class="btn btn-primary btn-block" style="margin-top:18px;" onclick="submitSendToDispatch()" ${state.busy?"disabled":""}>${state.busy?"Sending…":"Send to Dispatch"}</button>
-    </div>`;
-}
-async function submitSendToDispatch(){
-  if(!can("boardSendToDispatch")) return;
-  const code = document.getElementById("sd-board").value;
-  const location = document.getElementById("sd-loc").value;
-  const qty = parseInt(document.getElementById("sd-qty").value, 10);
-  const ref = document.getElementById("sd-ref").value.trim();
-  if (!code || !qty || qty <= 0){ toast("Enter a valid quantity.", "error"); return; }
-  if (!dispatchBoardRef){ toast("Not connected to the Dispatch app yet — try again in a moment.", "error"); return; }
-  const who = state.currentUser.username;
-
-  const board = findBoard(state.data, code);
-  if (!board){ toast("That board no longer exists.", "error"); return; }
-  const here = board.qty[location] || 0;
-  if (qty > here && !confirm(`Only ${here} ${board.unit} on hand at ${location} — send anyway? Stock will show as negative there.`)) return;
-
-  state.busy = true; render();
-  try{
-    // Deduct here first...
-    const ok = await mutate((data) => {
-      const b = findBoard(data, code);
-      if (!b) throw new Error("That board no longer exists — refresh and try again.");
-      if(typeof b.qty !== 'object') b.qty = {};
-      b.qty[location] = (b.qty[location] || 0) - qty;
-      checkReorder(data, b);
-      data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "sentToDispatch", qtyChange: -qty, resultingQty: totalQty(b), reason: `Sent to dispatch${ref ? ' — ' + ref : ''} (${location})` });
-      return data;
-    }, null);
-    if(!ok){ state.busy = false; render(); return; }
-
-    // ...then create the matching item directly in Dispatch's own data.
-    // Atomic append (transaction) — a plain read-then-overwrite could
-    // wipe out a Dispatch change someone else saved in the same moment.
-    const today = new Date().toLocaleDateString("en-GB", {day:"2-digit", month:"long", year:"numeric"});
-    const newItem = {
-      id: uid(), type: board.description, qty, ref,
-      status: "unvinaged",
-      addedDate: today, vinagedDate: null, readyDate: null, dispatchedDate: null, noteId: null,
-      recipeSnapshot: [{ sourceApp: "boardStock", itemId: code, desc: board.description, deductQty: qty, location }]
-    };
-    await dispatchBoardRef.child("items").transaction(current => {
-      const items = Array.isArray(current) ? current : (current && typeof current === "object" ? Object.values(current) : []);
-      items.push(newItem);
-      return items;
-    });
-    toast(`Sent ${qty} ${board.unit} of ${code} to Dispatch.`, "ok");
-    document.getElementById("sd-qty").value = "1";
-    document.getElementById("sd-ref").value = "";
-  } catch(e){
-    toast("Could not reach the Dispatch app — check your connection and try again.", "err");
-  }
-  state.busy = false; render();
-}
-
-/* ---------------- SUPPLIERS (added 2026-09-22, per user request: "boards
-   dont work the same as consumables when it comes to the email section i
-   want that to work the same" — mirrors the Consumables app's Suppliers
-   tab exactly, so the weekly reorder digest script can group boards by
-   supplier the same way it groups screws/consumables). ---------------- */
-function renderSuppliersTab(){
-  const suppliers = Object.entries(state.data.suppliers || {}).sort((a,b)=> a[1].name.localeCompare(b[1].name));
-  const rows = suppliers.map(([sid, s]) => {
-    const assigned = state.data.boards.filter(b => b.supplierId === sid);
-    const low = assigned.filter(b => totalQty(b) <= b.reorderLevel).length;
-    return `
-      <div class="user-row">
-        <div>
-          <div style="font-weight:600;">${esc(s.name)}</div>
-          <div class="small-muted">${esc(s.contactPerson||'—')} · ${esc(s.email||'—')}${s.ccEmail ? ' · cc ' + esc(s.ccEmail) : ''}</div>
-          <div class="small-muted">${assigned.length} board(s) assigned${low>0 ? ` · <span style="color:#e17e5b;">${low} need reordering</span>` : ''}</div>
-        </div>
-        <button class="btn btn-ghost btn-sm" onclick="openEditSupplier('${sid}')">Edit</button>
-      </div>`;
-  }).join("");
-  return `
-    <div class="card">
-      <h2 style="margin-top:0;">Suppliers</h2>
-      <p class="small-muted">Assign a supplier to each board so the weekly reorder digest sends one email per supplier, listing only their boards.</p>
-      <div class="stack">${rows || '<div class="empty">No suppliers added yet.</div>'}</div>
-      <button class="btn btn-primary" style="margin-top:14px;" onclick="openAddSupplier()">+ Add supplier</button>
-    </div>`;
-}
-function openAddSupplier(){
-  openModal(`
-    <h3>Add supplier</h3>
-    <label>Supplier name</label><input type="text" id="sp-name">
-    <label>Contact person</label><input type="text" id="sp-contact">
-    <label>Reorder email address</label><input type="text" id="sp-email">
-    <label>CC email (optional)</label><input type="text" id="sp-cc">
-    <label style="display:flex;align-items:center;gap:7px;font-weight:400;margin-top:10px;"><input type="checkbox" id="sp-direct" style="width:auto;"> Send the weekly digest straight to this supplier (skip reviewing it yourself first)</label>
-    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitAddSupplier()">Add supplier</button></div>
-  `);
-}
-async function submitAddSupplier(){
-  const name = document.getElementById("sp-name").value.trim();
-  const contactPerson = document.getElementById("sp-contact").value.trim();
-  const email = document.getElementById("sp-email").value.trim();
-  const ccEmail = document.getElementById("sp-cc").value.trim();
-  const sendDirect = document.getElementById("sp-direct").checked;
-  if(!name){ toast("Enter a supplier name.", "error"); return; }
-  const ok = await mutate((data) => {
-    if(!data.suppliers) data.suppliers = {};
-    data.suppliers[uid()] = { name, contactPerson, email, ccEmail, sendDirect };
-    return data;
-  }, `${name} added.`);
-  if(ok) closeModal();
-}
-function openEditSupplier(sid){
-  const s = state.data.suppliers[sid];
-  openModal(`
-    <h3>Edit ${esc(s.name)}</h3>
-    <label>Supplier name</label><input type="text" id="sp-name" value="${esc(s.name)}">
-    <label>Contact person</label><input type="text" id="sp-contact" value="${esc(s.contactPerson||'')}">
-    <label>Reorder email address</label><input type="text" id="sp-email" value="${esc(s.email||'')}">
-    <label>CC email (optional)</label><input type="text" id="sp-cc" value="${esc(s.ccEmail||'')}">
-    <label style="display:flex;align-items:center;gap:7px;font-weight:400;margin-top:10px;"><input type="checkbox" id="sp-direct" style="width:auto;" ${s.sendDirect?'checked':''}> Send the weekly digest straight to this supplier (skip reviewing it yourself first)</label>
-    <div class="modal-actions">
-      <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn" style="background:var(--red);color:#fff;" onclick="deleteSupplier('${sid}')">Delete</button>
-      <button class="btn btn-primary" onclick="submitEditSupplier('${sid}')">Save</button>
-    </div>
-  `);
-}
-async function submitEditSupplier(sid){
-  const name = document.getElementById("sp-name").value.trim();
-  const contactPerson = document.getElementById("sp-contact").value.trim();
-  const email = document.getElementById("sp-email").value.trim();
-  const ccEmail = document.getElementById("sp-cc").value.trim();
-  const sendDirect = document.getElementById("sp-direct").checked;
-  if(!name){ toast("Enter a supplier name.", "error"); return; }
-  const ok = await mutate((data) => {
-    data.suppliers[sid] = { name, contactPerson, email, ccEmail, sendDirect };
-    return data;
-  }, "Supplier updated.");
-  if(ok) closeModal();
-}
-async function deleteSupplier(sid){
-  if(!confirm("Delete this supplier? Boards assigned to them will show as unassigned.")) return;
-  const ok = await mutate((data) => {
-    delete data.suppliers[sid];
-    data.boards.forEach(b => { if(b.supplierId === sid) b.supplierId = ""; });
-    return data;
-  }, "Supplier removed.");
-  if(ok) closeModal();
-}
-function supplierSelectHtml(id, selectedId){
-  const suppliers = Object.entries(state.data.suppliers || {}).sort((a,b)=> a[1].name.localeCompare(b[1].name));
-  const opts = suppliers.map(([sid,s]) => `<option value="${sid}" ${sid===selectedId?'selected':''}>${esc(s.name)}</option>`).join("");
-  return `<label>Supplier</label><select id="${id}"><option value="">No supplier set</option>${opts}</select>`;
+  }, `Removed ${qty} from ${code}.`);
+  if (ok){ document.getElementById("rq-qty").value = ""; const o = document.getElementById("rq-other"); if(o) o.value = ""; }
 }
 
 /* ---------------- BOARDS ADMIN (add / edit) ---------------- */
 function renderBoardsAdmin(){
   const boards = [...state.data.boards].sort((a,b)=>a.code.localeCompare(b.code));
-  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
   return `
     <div class="card" style="margin-bottom:18px;">
       <h2 style="margin-top:0;">Add a new board</h2>
@@ -1427,11 +845,8 @@ function renderBoardsAdmin(){
         <div><label>Category / size</label><input type="text" id="nb-cat" placeholder="e.g. 9x6"></div>
         <div><label>Opening quantity</label><input type="number" id="nb-qty" value="0" min="0"></div>
       </div>
-      <label>Opening quantity's location</label>
-      <select id="nb-loc">${locations.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
       <label>Reorder level</label>
       <input type="number" id="nb-reorder" value="5" min="0">
-      ${supplierSelectHtml('nb-supplier', null)}
       <button class="btn btn-primary btn-block" style="margin-top:18px;" onclick="submitNewBoard()" ${state.busy?"disabled":""}>${state.busy?"Saving…":"Add board"}</button>
     </div>
     <h3>Existing boards</h3>
@@ -1441,7 +856,7 @@ function renderBoardsAdmin(){
           <div>
             <div class="mono board-code">${esc(b.code)}</div>
             <div style="font-weight:600;">${esc(b.description)}</div>
-            <div class="small-muted">${esc(b.category||'—')} · reorder at ${b.reorderLevel} ${esc(b.unit)} · on hand ${totalQty(b)}</div>
+            <div class="small-muted">${esc(b.category||'—')} · reorder at ${b.reorderLevel} ${esc(b.unit)} · on hand ${b.qty}</div>
           </div>
           <button class="btn btn-ghost btn-sm" onclick="openEditBoard('${esc(b.code)}')">Edit</button>
         </div>`).join("") || `<div class="empty">No boards yet.</div>`}
@@ -1453,16 +868,14 @@ async function submitNewBoard(){
   const cat = document.getElementById("nb-cat").value.trim();
   const unit = document.getElementById("nb-unit").value.trim() || "EA";
   const qty = parseInt(document.getElementById("nb-qty").value, 10) || 0;
-  const location = document.getElementById("nb-loc").value;
   const reorderLevel = parseInt(document.getElementById("nb-reorder").value, 10) || 0;
-  const supplierId = document.getElementById("nb-supplier").value;
   if (!code || !desc){ toast("Stock code and description are required.", "error"); return; }
   const ok = await mutate((data) => {
     if (findBoard(data, code)) throw new Error(`Board ${code} already exists.`);
-    const board = { code, description: desc, category: cat, unit, qty: { [location]: qty }, reorderLevel, reorderNotified:false, supplierId };
+    const board = { code, description: desc, category: cat, unit, qty, reorderLevel, reorderNotified:false };
     data.boards.push(board);
     checkReorder(data, board);
-    data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: state.currentUser.username, boardCode: code, action: "newBoard", qtyChange: qty, resultingQty: qty, reason: "Board added" });
+    data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: state.currentUser.name, boardCode: code, action: "newBoard", qtyChange: qty, resultingQty: qty, reason: "Board added" });
     return data;
   }, `${code} added.`);
   if (ok){ ["nb-code","nb-desc","nb-cat","nb-qty"].forEach(id=>document.getElementById(id).value=""); document.getElementById("nb-unit").value="EA"; document.getElementById("nb-reorder").value="5"; }
@@ -1478,7 +891,6 @@ function openEditBoard(code){
       <div><label>Unit</label><input type="text" id="eb-unit" value="${esc(b.unit)}"></div>
     </div>
     <label>Reorder level</label><input type="number" id="eb-reorder" value="${b.reorderLevel}" min="0">
-    ${supplierSelectHtml('eb-supplier', b.supplierId || '')}
     <div class="helptext">To change on-hand quantity, use Add stock / Remove stock so it's logged with a reason.</div>
     <button class="btn btn-primary btn-block" style="margin-top:16px;" onclick="submitEditBoard('${esc(code)}')">Save changes</button>
   `);
@@ -1488,11 +900,10 @@ async function submitEditBoard(code){
   const cat = document.getElementById("eb-cat").value.trim();
   const unit = document.getElementById("eb-unit").value.trim() || "EA";
   const reorderLevel = parseInt(document.getElementById("eb-reorder").value, 10) || 0;
-  const supplierId = document.getElementById("eb-supplier").value;
   const ok = await mutate((data) => {
     const board = findBoard(data, code);
     if (!board) throw new Error("Board not found.");
-    board.description = desc; board.category = cat; board.unit = unit; board.reorderLevel = reorderLevel; board.supplierId = supplierId;
+    board.description = desc; board.category = cat; board.unit = unit; board.reorderLevel = reorderLevel;
     checkReorder(data, board);
     return data;
   }, `${code} updated.`);
@@ -1524,55 +935,17 @@ function renderLog(){
     </div>`;
 }
 
-// Cutting Log (added 2026-09-23, per user request: "on the stock list
-// what is in stock and on a separate log what was cut and the notes
-// with it") — the Stock tab stays purely current on-hand levels; this
-// is a dedicated view of just the "remove" log entries, since that's
-// the action used whenever board stock gets cut/used for a job, with
-// its Notes field shown clearly rather than mixed in with every other
-// kind of activity (adds, new boards, sends to dispatch, etc).
-function renderCuttingLog(){
-  const entries = state.data.log.filter(e => e.action === "remove").slice(0, 200);
-  return `
-    <div class="card">
-      <h2 style="margin-top:0;">Cutting log</h2>
-      <p class="small-muted">Every time board stock was removed/used, in one place — separate from the full Activity Log.</p>
-      <div style="overflow-x:auto;">
-      <table>
-        <thead><tr><th>When</th><th>Board</th><th>Taken by</th><th>Recorded by</th><th>Qty used</th><th>Reason</th><th>Notes</th></tr></thead>
-        <tbody>
-          ${entries.map(e => `
-            <tr>
-              <td class="small-muted">${fmtDate(e.ts)}</td>
-              <td class="mono">${esc(e.boardCode)}</td>
-              <td><b>${esc(e.takenBy || e.user)}</b></td>
-              <td class="small-muted">${esc(e.user)}</td>
-              <td class="qty-minus">${Math.abs(e.qtyChange)}</td>
-              <td class="small-muted">${esc(e.reason||'')}</td>
-              <td>${esc(e.notes||'—')}</td>
-            </tr>`).join("") || `<tr><td colspan="7" class="empty">Nothing cut/removed yet.</td></tr>`}
-        </tbody>
-      </table>
-      </div>
-    </div>`;
-}
-
-/* ---------------- USERS (shared roster — same accounts as Dispatch/Stock List) ---------------- */
+/* ---------------- USERS (root management) ---------------- */
 function renderUsers(){
-  const users = state.sharedUsers;
-  const iAmMainRoot = currentUserIsMainRoot();
+  const users = state.data.users;
   return `
     <div class="card" style="margin-bottom:18px;">
       <h2 style="margin-top:0;">Add a team member</h2>
       <div class="field-row">
-        <div><label>Username</label><input type="text" id="nu-name" placeholder="e.g. Thabo"></div>
-        <div><label>PIN (at least 4 characters)</label><input type="password" id="nu-pin" placeholder="••••"></div>
+        <div><label>Name</label><input type="text" id="nu-name" placeholder="e.g. Thabo"></div>
+        <div><label>PIN (4–6 digits)</label><input type="password" inputmode="numeric" id="nu-pin" maxlength="6" placeholder="••••"></div>
       </div>
-      <label>Which apps can they use?${iAmMainRoot ? '' : ' (main root only)'}</label>
-      <div class="perm-grid" style="${iAmMainRoot ? '' : 'opacity:.5;'}">
-        ${Object.keys(APP_LABELS).map(a => `<label class="perm-check"><input type="checkbox" class="nu-app" data-app="${a}" ${iAmMainRoot ? '' : 'disabled'}> ${APP_LABELS[a]}</label>`).join("")}
-      </div>
-      <label style="margin-top:10px;">What can they do in ${esc(CONFIG.APP_TITLE)}?</label>
+      <label>What can they do?</label>
       <div class="perm-grid">
         ${PERMISSIONS.map(p => `<label class="perm-check"><input type="checkbox" id="nu-perm-${p.key}"> ${p.icon} ${p.label}</label>`).join("")}
       </div>
@@ -1583,121 +956,76 @@ function renderUsers(){
       ${users.map(u => `
         <div class="user-row">
           <div>
-            <div style="font-weight:600;">${esc(u.username)} ${isMainRoot(u)?'<span class="badge badge-ok">Main root</span>':(u.isRoot?'<span class="badge badge-ok">Root</span>':'')}</div>
-            <div class="small-muted">${isMainRoot(u) ? 'All apps' : Object.keys(APP_LABELS).filter(a=>userHasApp(u,a)).map(a=>APP_LABELS[a]).join(", ") || 'No apps'}</div>
-            <div class="small-muted">${u.isRoot ? 'Full access' : PERMISSIONS.filter(p=>u.permissions && u.permissions[p.key]).map(p=>p.label).join(", ") || 'No permissions set in this app'}</div>
+            <div style="font-weight:600;">${esc(u.name)} ${u.role==='root'?'<span class="badge badge-ok">Root</span>':''}${u.active===false?'<span class="badge badge-reorder">Inactive</span>':''}</div>
+            <div class="small-muted">${u.role==='root' ? 'Full access' : PERMISSIONS.filter(p=>u.permissions[p.key]).map(p=>p.label).join(", ") || 'No permissions set'}</div>
           </div>
-          ${(isMainRoot(u) && !iAmMainRoot) ? `<span class="small-muted">Can't be edited</span>` : `<button class="btn btn-ghost btn-sm" onclick="openEditUser('${u.id}')">Edit</button>`}
+          ${u.role==='root' ? `<span class="small-muted">Can't be edited</span>` : `<button class="btn btn-ghost btn-sm" onclick="openEditUser('${u.id}')">Edit</button>`}
         </div>`).join("")}
     </div>`;
 }
 async function submitNewUser(){
-  const username = document.getElementById("nu-name").value.trim();
-  const pin = document.getElementById("nu-pin").value;
-  if (!username || pin.length < 4){ toast("Username and a PIN of at least 4 characters are required.", "error"); return; }
+  const name = document.getElementById("nu-name").value.trim();
+  const pin = document.getElementById("nu-pin").value.trim();
+  if (!name || !/^[0-9]{4,6}$/.test(pin)){ toast("Name and a 4–6 digit PIN are required.", "error"); return; }
   const permissions = {}; PERMISSIONS.forEach(p => permissions[p.key] = document.getElementById(`nu-perm-${p.key}`).checked);
-  const apps = currentUserIsMainRoot()
-    ? Object.fromEntries([...document.querySelectorAll(".nu-app")].map(cb => [cb.dataset.app, cb.checked]))
-    : defaultApps();
-  state.sharedUsers.push({ id: uid(), username, pin: await hashPin(pin), isRoot: false, permissions, apps });
-  await saveSharedUsers();
-  toast(`${username} added.`);
-  render();
+  const ok = await mutate((data) => {
+    if (data.users.some(u => u.pin === pin)) throw new Error("That PIN is already in use — choose a different one.");
+    data.users.push({ id: uid(), name, pin, role:"user", active:true, permissions });
+    return data;
+  }, `${name} added.`);
+  if (ok){ document.getElementById("nu-name").value=""; document.getElementById("nu-pin").value=""; PERMISSIONS.forEach(p=>document.getElementById(`nu-perm-${p.key}`).checked=false); }
 }
 function openEditUser(id){
-  const u = state.sharedUsers.find(x=>x.id===id);
+  const u = state.data.users.find(x=>x.id===id);
   if (!u) return;
-  if (isMainRoot(u) && !currentUserIsMainRoot()){ toast("Only the main root account can edit itself.", "error"); return; }
-  const iAmMainRoot = currentUserIsMainRoot();
-  const apps = u.apps || defaultApps();
   openModal(`
-    <div class="modal-head"><h3>Edit ${esc(u.username)}</h3><button class="close-x" onclick="closeModal()">×</button></div>
-    <label>Username</label><input type="text" id="eu-name" value="${esc(u.username)}">
-    <label>PIN</label><input type="password" id="eu-pin" placeholder="Leave blank to keep current PIN">
-    <label style="margin-top:10px;">Which apps can they use?${iAmMainRoot ? '' : ' (main root only)'}</label>
-    <div class="perm-grid" style="${iAmMainRoot ? '' : 'opacity:.5;'}">
-      ${Object.keys(APP_LABELS).map(a => `<label class="perm-check"><input type="checkbox" class="eu-app" data-app="${a}" ${apps[a]?'checked':''} ${iAmMainRoot ? '' : 'disabled'}> ${APP_LABELS[a]}</label>`).join("")}
-    </div>
-    <label style="margin-top:10px;">What can they do in ${esc(CONFIG.APP_TITLE)}?</label>
+    <div class="modal-head"><h3>Edit ${esc(u.name)}</h3><button class="close-x" onclick="closeModal()">×</button></div>
+    <label>Name</label><input type="text" id="eu-name" value="${esc(u.name)}">
+    <label>PIN</label><input type="password" inputmode="numeric" id="eu-pin" maxlength="6" value="${esc(u.pin)}">
+    <label>What can they do?</label>
     <div class="perm-grid">
-      ${PERMISSIONS.map(p => `<label class="perm-check"><input type="checkbox" id="eu-perm-${p.key}" ${u.permissions && u.permissions[p.key]?'checked':''}> ${p.icon} ${p.label}</label>`).join("")}
+      ${PERMISSIONS.map(p => `<label class="perm-check"><input type="checkbox" id="eu-perm-${p.key}" ${u.permissions[p.key]?'checked':''}> ${p.icon} ${p.label}</label>`).join("")}
     </div>
-    ${!isMainRoot(u) ? `<label class="perm-check" style="margin-top:12px;"><input type="checkbox" id="eu-root" ${u.isRoot?'checked':''}> Full access (root — can do everything in their apps)</label>` : ''}
+    <label class="perm-check" style="margin-top:12px;"><input type="checkbox" id="eu-active" ${u.active!==false?'checked':''}> Active (unchecking hides them from the login screen)</label>
     <div style="display:flex; gap:10px; margin-top:16px;">
       <button class="btn btn-primary" style="flex:1;" onclick="submitEditUser('${id}')">Save changes</button>
-      ${isMainRoot(u) ? '' : `<button class="btn btn-danger" onclick="deleteUser('${id}')">Remove</button>`}
+      <button class="btn btn-danger" onclick="deleteUser('${id}')">Remove</button>
     </div>
   `);
 }
 async function submitEditUser(id){
-  const u = state.sharedUsers.find(x=>x.id===id);
-  if (!u) return;
-  if (isMainRoot(u) && !currentUserIsMainRoot()) return; // belt and braces
-  const username = document.getElementById("eu-name").value.trim();
-  const pin = document.getElementById("eu-pin").value;
-  if (!username){ toast("Username is required.", "error"); return; }
+  const name = document.getElementById("eu-name").value.trim();
+  const pin = document.getElementById("eu-pin").value.trim();
+  const active = document.getElementById("eu-active").checked;
+  if (!name || !/^[0-9]{4,6}$/.test(pin)){ toast("Name and a 4–6 digit PIN are required.", "error"); return; }
   const permissions = {}; PERMISSIONS.forEach(p => permissions[p.key] = document.getElementById(`eu-perm-${p.key}`).checked);
-  const rootBox = document.getElementById("eu-root");
-  // App access is main-root-only — for anyone else the checkboxes are
-  // disabled, so their state is ignored and the existing value carries
-  // through untouched, same reasoning as the Dispatch/Stock List apps.
-  const apps = currentUserIsMainRoot()
-    ? Object.fromEntries([...document.querySelectorAll(".eu-app")].map(cb => [cb.dataset.app, cb.checked]))
-    : (u.apps || defaultApps());
-  u.username = username;
-  if (pin) u.pin = await hashPin(pin);
-  // Merge, don't replace — replacing wiped this person's permissions in
-  // the other three apps (Dispatch, Stock List, Consumables).
-  u.permissions = { ...(u.permissions || {}), ...permissions };
-  u.isRoot = isMainRoot(u) ? true : (rootBox ? rootBox.checked : u.isRoot);
-  u.apps = isMainRoot(u) ? defaultApps() : apps;
-  await saveSharedUsers();
-  toast("User updated.");
-  closeModal();
-  render();
+  const ok = await mutate((data) => {
+    const user = data.users.find(x=>x.id===id);
+    if (!user) throw new Error("User not found.");
+    if (data.users.some(x=>x.id!==id && x.pin===pin)) throw new Error("That PIN is already in use.");
+    user.name=name; user.pin=pin; user.permissions=permissions; user.active=active;
+    return data;
+  }, "User updated.");
+  if (ok) closeModal();
 }
 async function deleteUser(id){
-  const target = state.sharedUsers.find(x=>x.id===id);
-  if (!target) return;
-  if (isMainRoot(target)){ toast("You can't delete the main root account.", "error"); return; }
-  if (target.isRoot && state.sharedUsers.filter(u=>u.isRoot).length <= 1){ toast("You can't delete the only root account — make another user root first.", "error"); return; }
-  if (id === (state.currentUser && state.currentUser.id)){ toast("You can't delete the account you're logged in as.", "error"); return; }
-  if (!confirm("Remove this user? They'll no longer be able to log in to any app.")) return;
-  state.sharedUsers = state.sharedUsers.filter(x=>x.id!==id);
-  await saveSharedUsers();
-  toast("User removed.");
-  closeModal();
-  render();
+  if (!confirm("Remove this user? They'll no longer be able to log in.")) return;
+  const ok = await mutate((data) => { data.users = data.users.filter(x=>x.id!==id); return data; }, "User removed.");
+  if (ok) closeModal();
 }
 
 /* ---------------- SETTINGS (root) ---------------- */
 function renderSettings(){
   const m = state.data.meta;
   const link = m.appUrl || window.location.href;
-  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
   return `
-    <div class="card" style="margin-bottom:18px;">
-      <h2 style="margin-top:0;">Locations</h2>
-      <p class="small-muted">Where board stock is physically kept — each shows as its own section on the Stock tab.</p>
-      <div class="stack">
-        ${locations.map((l,i) => `
-          <div class="user-row">
-            <div style="font-weight:600;">${esc(l)}</div>
-            ${locations.length > 1 ? `<button class="btn btn-ghost btn-sm" onclick="removeLocation(${i})">Remove</button>` : `<span class="small-muted">Can't remove the last one</span>`}
-          </div>`).join("")}
-      </div>
-      <div class="field-row" style="margin-top:14px;">
-        <div style="flex:1;"><input type="text" id="nl-name" placeholder="e.g. Sandton"></div>
-        <button class="btn btn-primary" onclick="addLocation()">Add location</button>
-      </div>
-    </div>
     <div class="card" style="margin-bottom:18px;">
       <h2 style="margin-top:0;">Workshop settings</h2>
       <label>Company / workshop name</label>
       <input type="text" id="st-company" value="${esc(m.companyName)}">
       <label>Reorder alert email</label>
       <input type="email" id="st-email" value="${esc(m.reorderEmail)}">
-      <div class="helptext">This address receives one automatic email per supplier every Monday morning, listing whatever's below its reorder level.</div>
+      <div class="helptext">${EMAIL_OK ? "Email sending is connected." : "⚠️ Email sending isn't connected yet — the EmailJS details in the app's CONFIG block still need to be filled in."}</div>
       <button class="btn btn-primary" style="margin-top:16px;" onclick="submitSettings()" ${state.busy?"disabled":""}>${state.busy?"Saving…":"Save settings"}</button>
     </div>
     <div class="card">
@@ -1710,31 +1038,8 @@ function renderSettings(){
       </div>
     </div>
     <div class="divider"></div>
-    <div class="small-muted">Connection: ${CONFIG_OK ? "Connected to stock database ✅" : "Not connected ⚠️"}</div>
+    <div class="small-muted">Connection: ${CONFIG_OK ? "Connected to stock database ✅" : "Not connected ⚠️"} · ${EMAIL_OK ? "Email connected ✅" : "Email not connected ⚠️"}</div>
   `;
-}
-async function addLocation(){
-  const input = document.getElementById("nl-name");
-  const name = input.value.trim();
-  if(!name){ toast("Enter a location name.", "error"); return; }
-  const ok = await mutate((data) => {
-    if(!data.locations) data.locations = ["Main"];
-    if(data.locations.some(l => l.toLowerCase() === name.toLowerCase())) throw new Error("That location already exists.");
-    data.locations.push(name);
-    return data;
-  }, `${name} added.`);
-  if(ok) input.value = "";
-}
-async function removeLocation(index){
-  const locations = state.data.locations || ["Main"];
-  const name = locations[index];
-  if(locations.length <= 1){ toast("You need at least one location.", "error"); return; }
-  const boardsHere = state.data.boards.filter(b => qtyAt(b, name) > 0);
-  if(boardsHere.length > 0 && !confirm(`${boardsHere.length} board type(s) still have stock recorded at "${name}". Remove this location anyway? That stock will no longer be shown anywhere — move it first if you don't want to lose track of it.`)) return;
-  const ok = await mutate((data) => {
-    data.locations = (data.locations || ["Main"]).filter((l,i) => i !== index);
-    return data;
-  }, `${name} removed.`);
 }
 async function submitSettings(){
   const companyName = document.getElementById("st-company").value.trim();
@@ -1755,7 +1060,6 @@ function copyLink(link){
 /* ============================================================================
    GO
    ============================================================================ */
-if ('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }
 boot();
 </script>
 </body>
