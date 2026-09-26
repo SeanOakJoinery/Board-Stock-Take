@@ -260,6 +260,10 @@
   .location-section summary::-webkit-details-marker{display:none;}
   .location-section summary::before{content:"▸ "; color:var(--amber);}
   .location-section[open] summary::before{content:"▾ "; color:var(--amber);}
+  .board-card.pick{cursor:pointer; transition:border-color .15s, transform .1s;}
+  .board-card.pick:hover{border-color:var(--accent, #c9a36b);}
+  .board-card.pick:active{transform:scale(.98);}
+  .board-card .pick-hint{font-size:12px; font-weight:600; color:var(--accent, #c9a36b);}
   .board-card{background:var(--panel); border:1px solid var(--border-soft); border-radius:var(--radius-lg); padding:16px; display:flex; flex-direction:column; gap:8px; position:relative;}
   .board-card.reorder{border-color:var(--red);}
   .board-code{font-size:12px; color:var(--amber); letter-spacing:.4px;}
@@ -938,6 +942,7 @@ function renderStock(){
   // quantity. The overall reorder check above still uses the TOTAL
   // across all locations, since "need reordering" is about the board
   // type overall, not any one site.
+  const canPick = can("boardRemoveQty");
   const sectionsHtml = locations.map((loc, i) => `
     <details class="location-section" ${i===0 ? 'open' : ''}>
       <summary>${esc(loc)} <span class="small-muted">(${allBoards.length} board${allBoards.length===1?'':'s'})</span></summary>
@@ -946,7 +951,7 @@ function renderStock(){
           const here = qtyAt(b, loc);
           const isLow = totalQty(b) <= b.reorderLevel;
           return `
-          <div class="board-card ${isLow?'reorder':''}">
+          <div class="board-card ${isLow?'reorder':''} ${canPick?'pick':''}" ${canPick?`onclick="pickBoardToRemove('${esc(b.code)}','${esc(loc).replace(/'/g,"\\'")}')" title="Tap to remove / cut this board"`:''}>
             <div class="board-desc">${esc(b.description)}</div>
             <div class="board-meta">${esc(b.category||'—')}</div>
             <div class="board-bottom">
@@ -954,6 +959,7 @@ function renderStock(){
               <span class="badge ${isLow?'badge-reorder':'badge-ok'}"><span class="dot ${isLow?'dot-reorder':'dot-ok'}"></span>${isLow?'Reorder':'OK'}</span>
             </div>
             <div class="small-muted">Total ${totalQty(b)} ${esc(b.unit)} · reorder at ${b.reorderLevel}</div>
+            ${canPick?'<div class="pick-hint">Tap to cut / remove →</div>':''}
           </div>`;
         }).join("") || `<div class="empty">No boards match "${esc(state.boardSearch)}".</div>`}
       </div>
@@ -1194,16 +1200,25 @@ async function applyStockCount(){
 
 /* ---------------- REMOVE QTY ---------------- */
 const REMOVE_REASONS = ["Job allocation","Damaged / waste","Stock take correction","Returned to supplier","Other"];
+// Tapping a board on the Stock tab opens Remove with that board and location already picked.
+function pickBoardToRemove(code, loc){
+  state.pick = { code, loc };
+  state.tab = "removeqty";
+  render();
+  window.scrollTo(0, 0);
+  setTimeout(() => { const q = document.getElementById("rq-qty"); if (q) q.focus(); }, 50);
+}
 function renderRemoveQty(){
+  const pick = state.pick || {}; state.pick = null;
   const boards = [...state.data.boards].sort((a,b)=>a.code.localeCompare(b.code));
   const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
   return `
     <div class="card">
       <h2 style="margin-top:0;">Remove stock</h2>
       <label>Location</label>
-      <select id="rq-loc">${locations.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
+      <select id="rq-loc">${locations.map(l=>`<option value="${esc(l)}" ${l===pick.loc?'selected':''}>${esc(l)}</option>`).join("")}</select>
       <label>Board</label>
-      <select id="rq-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(boardName(b))} — on hand: ${totalQty(b)} ${esc(b.unit)}</option>`).join("")}</select>
+      <select id="rq-board">${boards.map(b=>`<option value="${esc(b.code)}" ${b.code===pick.code?'selected':''}>${esc(boardName(b))} — on hand: ${totalQty(b)} ${esc(b.unit)}</option>`).join("")}</select>
       <label>Quantity used / removed</label>
       <input type="number" id="rq-qty" min="1" step="1" placeholder="e.g. 5">
       <label>Taken by</label>
