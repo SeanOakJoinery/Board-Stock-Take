@@ -658,6 +658,15 @@ function toast(msg, kind){
 // activeUsers() removed — the shared roster has no per-app "active" flag;
 // app access is controlled entirely by userHasApp()/apps{} instead.
 function findBoard(data, code){ return data.boards.find(b => b.code === code); }
+// Codes are kept only as the hidden ID behind each board; people see names.
+function boardName(b){ return b ? (b.description || b.code) + (b.category ? ' (' + b.category + ')' : '') : ''; }
+function boardNameByCode(code){ const b = state.data && (state.data.boards || []).find(x => x.code === code); return b ? boardName(b) : (code === '-' ? '—' : code); }
+function newBoardCode(data, desc){
+  const base = 'B' + String(desc || '').toUpperCase().replace(/[^A-Z0-9]+/g, '').slice(0, 10);
+  let code = base, n = 2;
+  while (data.boards.some(b => b.code === code)) code = base + '-' + (n++);
+  return code;
+}
 function can(perm){
   const u = state.currentUser;
   if (!u) return false;
@@ -938,7 +947,6 @@ function renderStock(){
           const isLow = totalQty(b) <= b.reorderLevel;
           return `
           <div class="board-card ${isLow?'reorder':''}">
-            <div class="board-code mono">${esc(b.code)}</div>
             <div class="board-desc">${esc(b.description)}</div>
             <div class="board-meta">${esc(b.category||'—')}</div>
             <div class="board-bottom">
@@ -958,7 +966,7 @@ function renderStock(){
       <div class="stat"><div class="n">${total-low}</div><div class="l">Stock OK</div></div>
     </div>
     <div class="toolbar">
-      <input type="text" placeholder="Search by code, name or size…" value="${esc(state.boardSearch)}" oninput="state.boardSearch=this.value; render(); this.focus();">
+      <input type="text" placeholder="Search by name or size…" value="${esc(state.boardSearch)}" oninput="state.boardSearch=this.value; render(); this.focus();">
       ${can("boardExportData") ? `<button class="btn" id="share-pdf-btn" onclick="generateAndSharePdf()">Print / Share PDF</button>` : ""}
     </div>
     ${sectionsHtml}`;
@@ -986,11 +994,11 @@ function buildStockPdfBlob(){
   const rows = boards.map(b => {
     const total = totalQty(b);
     const breakdown = locations.map(l => `${l}: ${qtyAt(b,l)}`).join("  ·  ");
-    return [b.code, b.description, b.category || "—", breakdown, `${total} ${b.unit}`, `${b.reorderLevel} ${b.unit}`];
+    return [b.description, b.category || "—", breakdown, `${total} ${b.unit}`, `${b.reorderLevel} ${b.unit}`];
   });
   doc.autoTable({
     startY: 44,
-    head: [["Code", "Description", "Category", "By location", "Total on hand", "Reorder at"]],
+    head: [["Board", "Category", "By location", "Total on hand", "Reorder at"]],
     body: rows,
     styles: { fontSize: 8, cellPadding: 2 },
     headStyles: { fillColor: [184, 121, 31] },
@@ -1035,7 +1043,7 @@ function renderAddQty(){
       <label>Location</label>
       <select id="aq-loc">${locations.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
       <label>Board</label>
-      <select id="aq-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(b.code)} — ${esc(b.description)} (${esc(b.category||'—')})</option>`).join("")}</select>
+      <select id="aq-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(boardName(b))}</option>`).join("")}</select>
       <label>Quantity received</label>
       <input type="number" id="aq-qty" min="1" step="1" placeholder="e.g. 20">
       <label>Note (optional)</label>
@@ -1058,7 +1066,7 @@ async function submitAddQty(){
     checkReorder(data, board);
     data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "add", qtyChange: qty, resultingQty: totalQty(board), reason: (note || "Stock received") + ` (${location})` });
     return data;
-  }, `Added ${qty} to ${code} at ${location}.`);
+  }, `Added ${qty} to ${boardNameByCode(code)} at ${location}.`);
   if (ok){ document.getElementById("aq-qty").value = ""; document.getElementById("aq-note").value = ""; }
 }
 
@@ -1095,7 +1103,7 @@ function renderStockCount(){
         <div><label>Location</label>
           <select onchange="state.countLoc=this.value; render();">${locations.map(l=>`<option value="${esc(l)}" ${l===loc?'selected':''}>${esc(l)}</option>`).join("")}</select></div>
         <div style="flex:1;min-width:200px;"><label>Find</label>
-          <input type="text" placeholder="Search by code or name…" value="${esc(state.countSearch||'')}" oninput="state.countSearch=this.value; render(); this.focus(); this.setSelectionRange(this.value.length,this.value.length);"></div>
+          <input type="text" placeholder="Search by name or size…" value="${esc(state.countSearch||'')}" oninput="state.countSearch=this.value; render(); this.focus(); this.setSelectionRange(this.value.length,this.value.length);"></div>
       </div>
       <div style="overflow-x:auto;margin-top:12px;">
       <table>
@@ -1106,7 +1114,7 @@ function renderStockCount(){
             const has = Object.prototype.hasOwnProperty.call(draft, b.code);
             const diff = has ? draft[b.code] - sys : null;
             return `<tr>
-              <td><span class="mono">${esc(b.code)}</span> <span class="small-muted">${esc(b.description)}</span></td>
+              <td>${esc(b.description)} <span class="small-muted">${esc(b.category||'')}</span></td>
               <td>${sys} ${esc(b.unit||'')}</td>
               <td><input type="number" min="0" step="1" style="width:90px;" value="${has ? draft[b.code] : ''}" oninput="countInput(this, '${esc(b.code)}', ${sys})"></td>
               <td id="cd-${esc(b.code)}" class="${diff>0?'qty-plus':diff<0?'qty-minus':''}">${diff===null ? '—' : (diff>0?'+':'') + diff}</td>
@@ -1195,7 +1203,7 @@ function renderRemoveQty(){
       <label>Location</label>
       <select id="rq-loc">${locations.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
       <label>Board</label>
-      <select id="rq-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(b.code)} — ${esc(b.description)} (total on hand: ${totalQty(b)} ${esc(b.unit)})</option>`).join("")}</select>
+      <select id="rq-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(boardName(b))} — on hand: ${totalQty(b)} ${esc(b.unit)}</option>`).join("")}</select>
       <label>Quantity used / removed</label>
       <input type="number" id="rq-qty" min="1" step="1" placeholder="e.g. 5">
       <label>Taken by</label>
@@ -1248,7 +1256,7 @@ async function submitRemoveQty(){
     // Cutting Log can show it clearly — see renderCuttingLog().
     data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "remove", qtyChange: -qty, resultingQty: totalQty(board), reason: reason + ` (${location})`, notes, takenBy });
     return data;
-  }, `Removed ${qty} from ${code} at ${location}.`);
+  }, `Removed ${qty} from ${boardNameByCode(code)} at ${location}.`);
   if (ok){ document.getElementById("rq-qty").value = ""; const o = document.getElementById("rq-other"); if(o) o.value = ""; const n = document.getElementById("rq-notes"); if(n) n.value = ""; }
 }
 
@@ -1271,7 +1279,7 @@ function renderSendToDispatch(){
       <label>Location</label>
       <select id="sd-loc">${locations.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
       <label>Board</label>
-      <select id="sd-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(b.code)} — ${esc(b.description)} (total on hand: ${totalQty(b)} ${esc(b.unit)})</option>`).join("")}</select>
+      <select id="sd-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(boardName(b))} — on hand: ${totalQty(b)} ${esc(b.unit)}</option>`).join("")}</select>
       <label>Quantity</label>
       <input type="number" id="sd-qty" min="1" step="1" value="1">
       <label>Reference / job</label>
@@ -1323,7 +1331,7 @@ async function submitSendToDispatch(){
       items.push(newItem);
       return items;
     });
-    toast(`Sent ${qty} ${board.unit} of ${code} to Dispatch.`, "ok");
+    toast(`Sent ${qty} ${board.unit} of ${boardName(board)} to Dispatch.`, "ok");
     document.getElementById("sd-qty").value = "1";
     document.getElementById("sd-ref").value = "";
   } catch(e){
@@ -1437,11 +1445,9 @@ function renderBoardsAdmin(){
     <div class="card" style="margin-bottom:18px;">
       <h2 style="margin-top:0;">Add a new board</h2>
       <div class="field-row">
-        <div><label>Stock code</label><input type="text" id="nb-code" placeholder="e.g. CH18"></div>
+        <div><label>Board name</label><input type="text" id="nb-desc" placeholder="e.g. 18mm Chipboard"></div>
         <div><label>Unit</label><input type="text" id="nb-unit" value="EA"></div>
       </div>
-      <label>Description</label>
-      <input type="text" id="nb-desc" placeholder="e.g. 18mm Chipboard">
       <div class="field-row">
         <div><label>Category / size</label><input type="text" id="nb-cat" placeholder="e.g. 9x6"></div>
         <div><label>Opening quantity</label><input type="number" id="nb-qty" value="0" min="0"></div>
@@ -1458,7 +1464,6 @@ function renderBoardsAdmin(){
       ${boards.map(b => `
         <div class="user-row">
           <div>
-            <div class="mono board-code">${esc(b.code)}</div>
             <div style="font-weight:600;">${esc(b.description)}</div>
             <div class="small-muted">${esc(b.category||'—')} · reorder at ${b.reorderLevel} ${esc(b.unit)} · on hand ${totalQty(b)}</div>
           </div>
@@ -1467,31 +1472,32 @@ function renderBoardsAdmin(){
     </div>`;
 }
 async function submitNewBoard(){
-  const code = document.getElementById("nb-code").value.trim().toUpperCase();
   const desc = document.getElementById("nb-desc").value.trim();
+  let code = "";
   const cat = document.getElementById("nb-cat").value.trim();
   const unit = document.getElementById("nb-unit").value.trim() || "EA";
   const qty = parseInt(document.getElementById("nb-qty").value, 10) || 0;
   const location = document.getElementById("nb-loc").value;
   const reorderLevel = parseInt(document.getElementById("nb-reorder").value, 10) || 0;
   const supplierId = document.getElementById("nb-supplier").value;
-  if (!code || !desc){ toast("Stock code and description are required.", "error"); return; }
+  if (!desc){ toast("Enter the board name.", "error"); return; }
   const ok = await mutate((data) => {
-    if (findBoard(data, code)) throw new Error(`Board ${code} already exists.`);
+    if (data.boards.some(b => (b.description||'').toLowerCase() === desc.toLowerCase() && (b.category||'').toLowerCase() === cat.toLowerCase())) throw new Error(`${desc}${cat ? ' (' + cat + ')' : ''} already exists.`);
+    code = newBoardCode(data, desc);
     const board = { code, description: desc, category: cat, unit, qty: { [location]: qty }, reorderLevel, reorderNotified:false, supplierId };
     data.boards.push(board);
     checkReorder(data, board);
     data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: state.currentUser.username, boardCode: code, action: "newBoard", qtyChange: qty, resultingQty: qty, reason: "Board added" });
     return data;
-  }, `${code} added.`);
-  if (ok){ ["nb-code","nb-desc","nb-cat","nb-qty"].forEach(id=>document.getElementById(id).value=""); document.getElementById("nb-unit").value="EA"; document.getElementById("nb-reorder").value="5"; }
+  }, `${desc} added.`);
+  if (ok){ ["nb-desc","nb-cat","nb-qty"].forEach(id=>document.getElementById(id).value=""); document.getElementById("nb-unit").value="EA"; document.getElementById("nb-reorder").value="5"; }
 }
 function openEditBoard(code){
   const b = findBoard(state.data, code);
   if (!b) return;
   openModal(`
-    <div class="modal-head"><h3>Edit ${esc(b.code)}</h3><button class="close-x" onclick="closeModal()">×</button></div>
-    <label>Description</label><input type="text" id="eb-desc" value="${esc(b.description)}">
+    <div class="modal-head"><h3>Edit ${esc(b.description)}</h3><button class="close-x" onclick="closeModal()">×</button></div>
+    <label>Board name</label><input type="text" id="eb-desc" value="${esc(b.description)}">
     <div class="field-row">
       <div><label>Category / size</label><input type="text" id="eb-cat" value="${esc(b.category||'')}"></div>
       <div><label>Unit</label><input type="text" id="eb-unit" value="${esc(b.unit)}"></div>
@@ -1514,7 +1520,7 @@ async function submitEditBoard(code){
     board.description = desc; board.category = cat; board.unit = unit; board.reorderLevel = reorderLevel; board.supplierId = supplierId;
     checkReorder(data, board);
     return data;
-  }, `${code} updated.`);
+  }, `${boardNameByCode(code)} updated.`);
   if (ok) closeModal();
 }
 
@@ -1531,7 +1537,7 @@ function renderLog(){
           ${entries.map(e => `
             <tr>
               <td class="small-muted">${fmtDate(e.ts)}</td>
-              <td class="mono">${esc(e.boardCode)}</td>
+              <td>${esc(boardNameByCode(e.boardCode))}</td>
               <td>${esc(e.user)}</td>
               <td class="${e.qtyChange>0?'qty-plus':e.qtyChange<0?'qty-minus':''}">${e.qtyChange>0?'+':''}${e.qtyChange}</td>
               <td>${e.resultingQty}</td>
@@ -1563,7 +1569,7 @@ function renderCuttingLog(){
           ${entries.map(e => `
             <tr>
               <td class="small-muted">${fmtDate(e.ts)}</td>
-              <td class="mono">${esc(e.boardCode)}</td>
+              <td>${esc(boardNameByCode(e.boardCode))}</td>
               <td><b>${esc(e.takenBy || e.user)}</b></td>
               <td class="small-muted">${esc(e.user)}</td>
               <td class="qty-minus">${Math.abs(e.qtyChange)}</td>
