@@ -63,7 +63,7 @@ function collectLowBoards(boardStock) {
     if (total <= (b.reorderLevel || 0)) {
       const supplier = b.supplierId ? suppliers[b.supplierId] : null;
       out.push({
-        line: `${b.description} (${b.code}): ${total} ${b.unit} on hand (reorder at ${b.reorderLevel} ${b.unit})`,
+        line: `${b.description}${b.category ? ` (${b.category})` : ""}: ${total} ${b.unit} on hand (reorder at ${b.reorderLevel} ${b.unit})`,
         supplierEmail: supplier && supplier.email ? supplier.email.trim() : null,
         supplierName: supplier ? supplier.name : null,
         supplierContact: supplier ? supplier.contactPerson : null,
