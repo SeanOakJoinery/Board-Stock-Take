@@ -48,24 +48,31 @@ function lateOrders(orders) {
       .filter((x) => x.out > 0)
       .map(({ l, out }) => `${out} ${l.unit || ""} of ${(l.desc || l.text || l.stockLabel || "item").trim()}${num(l.received) ? ` (${num(l.received)} of ${num(l.qty)} received)` : ""}`.replace(/\s+/g, " "));
     if (!lines.length) return;
-    const key = String(o.supplier || "Unknown supplier").trim().toLowerCase();
-    groups[key] = groups[key] || { supplier: String(o.supplier || "Unknown supplier").trim(), email: o.supplierEmail || "", orders: [] };
+    const location = String(o.location || "No location set").trim();
+    const key = location.toLowerCase() + "|" + String(o.supplier || "Unknown supplier").trim().toLowerCase();
+    groups[key] = groups[key] || { location, supplier: String(o.supplier || "Unknown supplier").trim(), email: o.supplierEmail || "", orders: [] };
     if (!groups[key].email && o.supplierEmail) groups[key].email = o.supplierEmail;
     groups[key].orders.push({ id, ref: o.ref || "", orderedDate: o.orderedDate, days, lines });
   });
   return Object.values(groups)
     .map((g) => ({ ...g, orders: g.orders.sort((a, b) => String(a.orderedDate).localeCompare(String(b.orderedDate))) }))
-    .sort((a, b) => b.orders[0].days - a.orders[0].days);
+    .sort((a, b) => a.location.localeCompare(b.location) || b.orders[0].days - a.orders[0].days);
 }
 
 function buildMessage(groups) {
   const day = new Date().toLocaleDateString("en-ZA", { weekday: "long", timeZone: "Africa/Johannesburg" });
-  const parts = groups.map((g) => {
+  const locations = [...new Set(groups.map((g) => g.location))];
+  const section = (gs) => gs.map((g) => {
     const head = `${g.supplier}${g.email ? " <" + g.email + ">" : ""}`;
     const body = g.orders.map((o) =>
       `  ${o.ref ? o.ref + " — " : ""}ordered ${fmtDate(o.orderedDate)} (${o.days} days ago)\n` +
       o.lines.map((t) => `    • ${t}`).join("\n")).join("\n");
     return `${head}\n${body}`;
+  }).join("\n\n");
+  const parts = locations.map((loc) => {
+    const gs = groups.filter((g) => g.location === loc);
+    const n = gs.reduce((a, g) => a + g.orders.length, 0);
+    return `=== ${loc.toUpperCase()} — ${n} order(s) ===\n\n${section(gs)}`;
   });
   const count = groups.reduce((a, g) => a + g.orders.length, 0);
   return `${day} orders check: ${count} order(s) placed ${LATE_DAYS}+ days ago still have items outstanding.\n\n` +
