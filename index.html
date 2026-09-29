@@ -632,8 +632,23 @@ async function mutate(mutatorFn, successMsg){
 // directly and sends one email per supplier every Monday morning.
 // reorderNotified is kept only as harmless historical bookkeeping —
 // nothing reads it anymore.
+// 2026-09-29: boards are either on-hand STOCK (kept in stock, reordered at
+// their reorder level) or once-off JOB boards (bought for one job, cut down
+// as used, never reordered). Old boards without a type are stock.
+function isJobBoard(b){ return !!b && b.stockType === "job"; }
+function needsReorder(b){ return !isJobBoard(b) && totalQty(b) <= (Number(b.reorderLevel) || 0); }
+function boardTypeFieldsHtml(prefix, b){
+  const job = isJobBoard(b);
+  return `
+    <label>Board type</label>
+    <select id="${prefix}-type" onchange="document.getElementById('${prefix}-jobwrap').style.display=this.value==='job'?'block':'none';document.getElementById('${prefix}-reorderwrap').style.display=this.value==='job'?'none':'block';">
+      <option value="stock" ${job?'':'selected'}>On-hand stock — reorder when low</option>
+      <option value="job" ${job?'selected':''}>Once-off for a job — no reorder</option>
+    </select>
+    <div id="${prefix}-jobwrap" style="display:${job?'block':'none'}"><label>Job name</label><input type="text" id="${prefix}-job" value="${esc((b && b.job) || '')}" placeholder="e.g. NH Hotel reception"></div>`;
+}
 async function checkReorder(data, board){
-  const low = totalQty(board) <= board.reorderLevel;
+  const low = needsReorder(board);
   if (low && !board.reorderNotified){
     board.reorderNotified = true;
   } else if (!low && board.reorderNotified){
@@ -934,7 +949,8 @@ function renderStock(){
     .filter(b => !q || b.code.toLowerCase().includes(q) || b.description.toLowerCase().includes(q) || (b.category||"").toLowerCase().includes(q))
     .sort((a,b) => a.code.localeCompare(b.code));
   const total = state.data.boards.length;
-  const low = state.data.boards.filter(b => totalQty(b) <= b.reorderLevel).length;
+  const low = state.data.boards.filter(needsReorder).length;
+  const stockCount = state.data.boards.filter(b => !isJobBoard(b)).length;
 
   // Sectioned by location per user request ("i want a kramaville section
   // and a boksburg section or wherever else i need it to be") — each
@@ -946,30 +962,34 @@ function renderStock(){
   const sectionsHtml = locations.map((loc, i) => `
     <details class="location-section" ${i===0 ? 'open' : ''}>
       <summary>${esc(loc)} <span class="small-muted">(${allBoards.length} board${allBoards.length===1?'':'s'})</span></summary>
+      ${[["stock", "On-hand stock"], ["job", "Job boards (once-off, not reordered)"]].map(([kind, title]) => {
+        const list = allBoards.filter(b => kind === "job" ? (isJobBoard(b) && (q || totalQty(b) > 0)) : !isJobBoard(b));
+        if (kind === "job" && !list.length) return "";
+        return `<div class="small-muted" style="margin:12px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:.05em">${title}</div>
       <div class="board-grid">
-        ${allBoards.map(b => {
+        ${list.map(b => {
           const here = qtyAt(b, loc);
-          const isLow = totalQty(b) <= b.reorderLevel;
+          const isLow = needsReorder(b), job = isJobBoard(b);
           return `
           <div class="board-card ${isLow?'reorder':''} ${canPick?'pick':''}" ${canPick?`onclick="pickBoardToRemove('${esc(b.code)}','${esc(loc).replace(/'/g,"\\'")}')" title="Tap to remove / cut this board"`:''}>
             <div class="board-desc">${esc(b.description)}</div>
             <div class="board-meta">${esc(b.category||'—')}</div>
             <div class="board-bottom">
               <div><span class="big-num">${here}</span> <span class="unit-tag">${esc(b.unit)}</span></div>
-              <span class="badge ${isLow?'badge-reorder':'badge-ok'}"><span class="dot ${isLow?'dot-reorder':'dot-ok'}"></span>${isLow?'Reorder':'OK'}</span>
+              ${job ? `<span class="badge" style="background:#1C2A36;color:#8FB9DB">Job</span>` : `<span class="badge ${isLow?'badge-reorder':'badge-ok'}"><span class="dot ${isLow?'dot-reorder':'dot-ok'}"></span>${isLow?'Reorder':'OK'}</span>`}
             </div>
-            <div class="small-muted">Total ${totalQty(b)} ${esc(b.unit)} · reorder at ${b.reorderLevel}</div>
+            <div class="small-muted">Total ${totalQty(b)} ${esc(b.unit)} · ${job ? 'for ' + esc(b.job || 'a job') : 'reorder at ' + b.reorderLevel}</div>
             ${canPick?'<div class="pick-hint">Tap to cut / remove →</div>':''}
           </div>`;
-        }).join("") || `<div class="empty">No boards match "${esc(state.boardSearch)}".</div>`}
-      </div>
+        }).join("") || `<div class="empty">${q ? 'No boards match "' + esc(state.boardSearch) + '".' : 'None yet.'}</div>`}
+      </div>`; }).join("")}
     </details>`).join("");
 
   return `
     <div class="stat-row">
       <div class="stat"><div class="n">${total}</div><div class="l">Board types</div></div>
       <div class="stat"><div class="n" style="color:${low?'#e17e5b':'inherit'}">${low}</div><div class="l">Need reordering</div></div>
-      <div class="stat"><div class="n">${total-low}</div><div class="l">Stock OK</div></div>
+      <div class="stat"><div class="n">${stockCount-low}</div><div class="l">Stock OK</div></div>
     </div>
     <div class="toolbar">
       <input type="text" placeholder="Search by name or size…" value="${esc(state.boardSearch)}" oninput="state.boardSearch=this.value; render(); this.focus();">
@@ -1000,7 +1020,7 @@ function buildStockPdfBlob(){
   const rows = boards.map(b => {
     const total = totalQty(b);
     const breakdown = locations.map(l => `${l}: ${qtyAt(b,l)}`).join("  ·  ");
-    return [b.description, b.category || "—", breakdown, `${total} ${b.unit}`, `${b.reorderLevel} ${b.unit}`];
+    return [b.description, b.category || "—", breakdown, `${total} ${b.unit}`, isJobBoard(b) ? `Job${b.job ? ': ' + b.job : ''} — no reorder` : `${b.reorderLevel} ${b.unit}`];
   });
   doc.autoTable({
     startY: 44,
@@ -1364,7 +1384,7 @@ function renderSuppliersTab(){
   const suppliers = Object.entries(state.data.suppliers || {}).sort((a,b)=> a[1].name.localeCompare(b[1].name));
   const rows = suppliers.map(([sid, s]) => {
     const assigned = state.data.boards.filter(b => b.supplierId === sid);
-    const low = assigned.filter(b => totalQty(b) <= b.reorderLevel).length;
+    const low = assigned.filter(needsReorder).length;
     return `
       <div class="user-row">
         <div>
@@ -1469,8 +1489,9 @@ function renderBoardsAdmin(){
       </div>
       <label>Opening quantity's location</label>
       <select id="nb-loc">${locations.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
-      <label>Reorder level</label>
-      <input type="number" id="nb-reorder" value="5" min="0">
+      ${boardTypeFieldsHtml('nb', null)}
+      <div id="nb-reorderwrap"><label>Reorder level</label>
+      <input type="number" id="nb-reorder" value="5" min="0"></div>
       ${supplierSelectHtml('nb-supplier', null)}
       <button class="btn btn-primary btn-block" style="margin-top:18px;" onclick="submitNewBoard()" ${state.busy?"disabled":""}>${state.busy?"Saving…":"Add board"}</button>
     </div>
@@ -1480,7 +1501,7 @@ function renderBoardsAdmin(){
         <div class="user-row">
           <div>
             <div style="font-weight:600;">${esc(b.description)}</div>
-            <div class="small-muted">${esc(b.category||'—')} · reorder at ${b.reorderLevel} ${esc(b.unit)} · on hand ${totalQty(b)}</div>
+            <div class="small-muted">${esc(b.category||'—')} · ${isJobBoard(b) ? 'job board' + (b.job ? ' for ' + esc(b.job) : '') + ' — no reorder' : 'reorder at ' + b.reorderLevel + ' ' + esc(b.unit)} · on hand ${totalQty(b)}</div>
           </div>
           <button class="btn btn-ghost btn-sm" onclick="openEditBoard('${esc(b.code)}')">Edit</button>
         </div>`).join("") || `<div class="empty">No boards yet.</div>`}
@@ -1495,17 +1516,19 @@ async function submitNewBoard(){
   const location = document.getElementById("nb-loc").value;
   const reorderLevel = parseInt(document.getElementById("nb-reorder").value, 10) || 0;
   const supplierId = document.getElementById("nb-supplier").value;
+  const stockType = document.getElementById("nb-type").value === "job" ? "job" : "stock";
+  const job = document.getElementById("nb-job").value.trim();
   if (!desc){ toast("Enter the board name.", "error"); return; }
   const ok = await mutate((data) => {
     if (data.boards.some(b => (b.description||'').toLowerCase() === desc.toLowerCase() && (b.category||'').toLowerCase() === cat.toLowerCase())) throw new Error(`${desc}${cat ? ' (' + cat + ')' : ''} already exists.`);
     code = newBoardCode(data, desc);
-    const board = { code, description: desc, category: cat, unit, qty: { [location]: qty }, reorderLevel, reorderNotified:false, supplierId };
+    const board = { code, description: desc, category: cat, unit, qty: { [location]: qty }, reorderLevel: stockType === "job" ? 0 : reorderLevel, reorderNotified:false, supplierId, stockType, job: stockType === "job" ? job : "" };
     data.boards.push(board);
     checkReorder(data, board);
     data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: state.currentUser.username, boardCode: code, action: "newBoard", qtyChange: qty, resultingQty: qty, reason: "Board added" });
     return data;
   }, `${desc} added.`);
-  if (ok){ ["nb-desc","nb-cat","nb-qty"].forEach(id=>document.getElementById(id).value=""); document.getElementById("nb-unit").value="EA"; document.getElementById("nb-reorder").value="5"; }
+  if (ok){ ["nb-desc","nb-cat","nb-qty"].forEach(id=>document.getElementById(id).value=""); document.getElementById("nb-unit").value="EA"; document.getElementById("nb-reorder").value="5"; document.getElementById("nb-job").value=""; }
 }
 function openEditBoard(code){
   const b = findBoard(state.data, code);
@@ -1517,7 +1540,8 @@ function openEditBoard(code){
       <div><label>Category / size</label><input type="text" id="eb-cat" value="${esc(b.category||'')}"></div>
       <div><label>Unit</label><input type="text" id="eb-unit" value="${esc(b.unit)}"></div>
     </div>
-    <label>Reorder level</label><input type="number" id="eb-reorder" value="${b.reorderLevel}" min="0">
+    ${boardTypeFieldsHtml('eb', b)}
+    <div id="eb-reorderwrap" style="display:${isJobBoard(b)?'none':'block'}"><label>Reorder level</label><input type="number" id="eb-reorder" value="${b.reorderLevel}" min="0"></div>
     ${supplierSelectHtml('eb-supplier', b.supplierId || '')}
     <div class="helptext">To change on-hand quantity, use Add stock / Remove stock so it's logged with a reason.</div>
     <button class="btn btn-primary btn-block" style="margin-top:16px;" onclick="submitEditBoard('${esc(code)}')">Save changes</button>
@@ -1529,10 +1553,13 @@ async function submitEditBoard(code){
   const unit = document.getElementById("eb-unit").value.trim() || "EA";
   const reorderLevel = parseInt(document.getElementById("eb-reorder").value, 10) || 0;
   const supplierId = document.getElementById("eb-supplier").value;
+  const stockType = document.getElementById("eb-type").value === "job" ? "job" : "stock";
+  const job = document.getElementById("eb-job").value.trim();
   const ok = await mutate((data) => {
     const board = findBoard(data, code);
     if (!board) throw new Error("Board not found.");
-    board.description = desc; board.category = cat; board.unit = unit; board.reorderLevel = reorderLevel; board.supplierId = supplierId;
+    board.description = desc; board.category = cat; board.unit = unit; board.reorderLevel = stockType === "job" ? 0 : reorderLevel; board.supplierId = supplierId;
+    board.stockType = stockType; board.job = stockType === "job" ? job : "";
     checkReorder(data, board);
     return data;
   }, `${boardNameByCode(code)} updated.`);
@@ -1544,7 +1571,8 @@ function renderLog(){
   const entries = state.data.log.slice(0, 200);
   return `
     <div class="card">
-      <h2 style="margin-top:0;">Activity log</h2>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;">Activity log</h2>
+      ${state.currentUser && state.currentUser.isRoot ? `<button class="btn btn-ghost btn-sm" onclick="openClearLog()">🗑 Delete test entries…</button>` : ''}</div>
       <div style="overflow-x:auto;">
       <table>
         <thead><tr><th>When</th><th>Board</th><th>User</th><th>Change</th><th>Balance</th><th>Reason</th></tr></thead>
@@ -1562,6 +1590,53 @@ function renderLog(){
       </table>
       </div>
     </div>`;
+}
+
+// 2026-09-29: root can delete log entries (e.g. a test run), per user
+// request. Pick the day, untick anything to keep, delete. Optionally also
+// reverses the stock changes those entries made, at the location shown in
+// each entry, so a test leaves no trace. Board types added during the test
+// stay (remove them under Boards if needed).
+function logDay(e){ const d = new Date(e.ts); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0,10); }
+function logLocation(e){ const m = String(e.reason || "").match(/\(([^()]+)\)(?::|$)/); return m ? m[1] : null; }
+function openClearLog(day){
+  if(!state.currentUser || !state.currentUser.isRoot) return;
+  const today = new Date(); today.setMinutes(today.getMinutes() - today.getTimezoneOffset());
+  day = day || today.toISOString().slice(0,10);
+  const list = state.data.log.filter(e => logDay(e) === day && e.action !== "setup");
+  openModal(`
+    <div class="modal-head"><h3>Delete log entries</h3><button class="close-x" onclick="closeModal()">×</button></div>
+    <label>Day</label><input type="date" id="cl-day" value="${day}" onchange="openClearLog(this.value)">
+    <p class="small-muted">${list.length} entr${list.length===1?'y':'ies'} on this day. Untick any you want to keep.</p>
+    <div style="max-height:320px;overflow:auto;border:1px solid var(--border-soft);border-radius:8px;padding:6px 10px;">
+      ${list.map(e => `<label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0;font-size:13px;"><input type="checkbox" class="cl-item" value="${esc(e.id)}" checked style="width:auto;margin-top:3px">
+        <span>${fmtDate(e.ts)} · <b>${esc(boardNameByCode(e.boardCode))}</b> · ${e.qtyChange>0?'+':''}${e.qtyChange} · ${esc(e.user)}<br><span class="small-muted">${esc(e.reason||'')}</span></span></label>`).join("") || '<div class="empty">Nothing logged on this day.</div>'}
+    </div>
+    <label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;font-size:13px;"><input type="checkbox" id="cl-undo" style="width:auto;margin-top:3px">
+      <span>Also undo the stock changes these entries made (put the quantities back as they were before the test)</span></label>
+    <button class="btn btn-primary btn-block" style="margin-top:14px;background:#b5553a;border-color:#b5553a" onclick="submitClearLog()" ${list.length?'':'disabled'}>Delete ticked entries</button>
+  `);
+}
+async function submitClearLog(){
+  if(!state.currentUser || !state.currentUser.isRoot) return;
+  const ids = [...document.querySelectorAll(".cl-item:checked")].map(x => x.value);
+  const undo = document.getElementById("cl-undo").checked;
+  if(!ids.length){ toast("Nothing ticked.", "error"); return; }
+  if(!confirm(`Delete ${ids.length} log entr${ids.length===1?'y':'ies'}${undo ? ' and undo their stock changes' : ''}? This can't be reversed.`)) return;
+  const skipped = [];
+  const ok = await mutate((data) => {
+    const idSet = new Set(ids);
+    if (undo) data.log.filter(e => idSet.has(e.id)).forEach(e => {
+      const b = findBoard(data, e.boardCode), loc = logLocation(e);
+      if (!b || !e.qtyChange || e.action === "newBoard") return;
+      if (!loc) { skipped.push(boardNameByCode(e.boardCode)); return; }
+      if (typeof b.qty !== "object" || !b.qty) b.qty = {};
+      b.qty[loc] = (Number(b.qty[loc]) || 0) - e.qtyChange;
+    });
+    data.log = data.log.filter(e => !idSet.has(e.id));
+    return data;
+  }, `${ids.length} log entr${ids.length===1?'y':'ies'} deleted.`);
+  if (ok){ closeModal(); if (skipped.length) toast("Couldn't tell the location for: " + skipped.join(", ") + " — check those with a stock count.", "error"); }
 }
 
 // Cutting Log (added 2026-09-23, per user request: "on the stock list
@@ -1738,6 +1813,9 @@ function renderSettings(){
       <label>Reorder alert email</label>
       <input type="email" id="st-email" value="${esc(m.reorderEmail)}">
       <div class="helptext">This address receives one automatic email per supplier every Monday morning, listing whatever's below its reorder level.</div>
+      <label>Also send the reorder emails and the outstanding-orders check to</label>
+      <input type="text" id="st-extra" value="${esc(m.digestExtra || '')}" placeholder="e.g. buyer@oakjoinery.co.za — separate more than one with commas">
+      <div class="helptext">These people get a copy of the Monday reorder emails (boards and consumables) and the Monday / Wednesday outstanding-orders email.</div>
       <button class="btn btn-primary" style="margin-top:16px;" onclick="submitSettings()" ${state.busy?"disabled":""}>${state.busy?"Saving…":"Save settings"}</button>
     </div>
     <div class="card">
@@ -1779,7 +1857,10 @@ async function removeLocation(index){
 async function submitSettings(){
   const companyName = document.getElementById("st-company").value.trim();
   const reorderEmail = document.getElementById("st-email").value.trim();
-  await mutate((data) => { data.meta.companyName = companyName; data.meta.reorderEmail = reorderEmail; return data; }, "Settings saved.");
+  const extra = document.getElementById("st-extra").value.split(/[,;\s]+/).map(x => x.trim()).filter(Boolean);
+  const bad = extra.filter(x => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x));
+  if (bad.length){ toast("That doesn't look like an email address: " + bad.join(", "), "error"); return; }
+  await mutate((data) => { data.meta.companyName = companyName; data.meta.reorderEmail = reorderEmail; data.meta.digestExtra = extra.join(", "); return data; }, "Settings saved.");
 }
 async function shareLink(link){
   if (navigator.share){
