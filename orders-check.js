@@ -80,7 +80,7 @@ function buildMessage(groups) {
     `\n\nOpen the Orders app to receive deliveries or close orders that aren't coming:\n${APP_URL}`;
 }
 
-async function sendEmail(groups) {
+async function sendEmail(groups, extra) {
   const count = groups.reduce((a, g) => a + g.orders.length, 0);
   const payload = {
     service_id: env.EMAILJS_SERVICE_ID,
@@ -88,7 +88,7 @@ async function sendEmail(groups) {
     user_id: env.EMAILJS_PUBLIC_KEY,
     accessToken: env.EMAILJS_PRIVATE_KEY,
     template_params: {
-      to_email: env.DIGEST_RECIPIENT_EMAIL,
+      to_email: [env.DIGEST_RECIPIENT_EMAIL].concat(extra || []).join(","),
       cc_email: "",
       from_name: "Orders check",
       item_name: `Orders check — ${count} order(s) outstanding after a week (${groups.map((g) => g.supplier).join(", ")})`.slice(0, 250),
@@ -114,7 +114,10 @@ async function main() {
     return;
   }
   console.log(buildMessage(groups));
-  await sendEmail(groups);
+  const meta = await fetchJson("boardStock/meta");
+  const extra = String(meta.digestExtra || "").split(/[,;\s]+/).filter((x) => /@/.test(x));
+  if (extra.length) console.log("Also sending to: " + extra.join(", "));
+  await sendEmail(groups, extra);
   console.log("Email sent.");
 }
 
