@@ -1,8 +1,8 @@
-name: Orders check (Mon & Wed)
+name: Orders check (overdue deliveries)
 
 on:
   schedule:
-    - cron: "0 5 * * 1,3"   # Mondays and Wednesdays 05:00 UTC = 07:00 South Africa time
+    - cron: "0 5 * * 1-5"   # weekdays 05:00 UTC = 07:00 SA: full list Mon & Wed, other days only when a promised delivery date has just passed
   workflow_dispatch: {}     # adds a "Run workflow" button for testing
 
 jobs:
@@ -22,3 +22,4 @@ jobs:
           EMAILJS_PUBLIC_KEY: ${{ secrets.EMAILJS_PUBLIC_KEY }}
           EMAILJS_PRIVATE_KEY: ${{ secrets.EMAILJS_PRIVATE_KEY }}
           DIGEST_RECIPIENT_EMAIL: ${{ secrets.DIGEST_RECIPIENT_EMAIL }}
+          FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
