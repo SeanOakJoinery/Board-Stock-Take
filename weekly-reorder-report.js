@@ -59,6 +59,7 @@ function collectLowBoards(boardStock) {
   const suppliers = boardStock.suppliers || {};
   const out = [];
   boards.forEach((b) => {
+    if (b && b.stockType === "job") return; // once-off job boards are never reordered
     const total = typeof b.qty === "number" ? b.qty : Object.values(b.qty || {}).reduce((a, v) => a + (Number(v) || 0), 0);
     if (total <= (b.reorderLevel || 0)) {
       const supplier = b.supplierId ? suppliers[b.supplierId] : null;
@@ -167,6 +168,8 @@ function groupBySupplierEmail(items) {
   return Object.values(groups);
 }
 
+// Extra people who get a copy (Board Stock → Settings → "Also send…"), comma separated.
+let EXTRA = [];
 async function sendDigestEmail(group) {
   const greeting = "Good day" + (group.supplierContact ? " " + group.supplierContact : "") + ",";
   // Direct-send suppliers get the email addressed straight to them (still
@@ -175,9 +178,9 @@ async function sendDigestEmail(group) {
   // it addressed to the digest recipient, with a forwarding note, exactly
   // as before.
   const goingDirect = group.sendDirect && group.supplierEmail;
-  const toEmail = goingDirect ? group.supplierEmail : DIGEST_RECIPIENT_EMAIL;
+  const toEmail = goingDirect ? group.supplierEmail : [DIGEST_RECIPIENT_EMAIL].concat(EXTRA).join(",");
   const ccEmail = goingDirect
-    ? [DIGEST_RECIPIENT_EMAIL, group.supplierCc].filter(Boolean).join(",")
+    ? [DIGEST_RECIPIENT_EMAIL, group.supplierCc].concat(EXTRA).filter(Boolean).join(",")
     : "";
   const forwardNote = goingDirect
     ? ""
@@ -223,6 +226,8 @@ async function main() {
     fetchJson("consumablesStock"),
   ]);
 
+  EXTRA = String((boardStock.meta && boardStock.meta.digestExtra) || "").split(/[,;\s]+/).filter((x) => /@/.test(x));
+  if (EXTRA.length) console.log("Also sending to: " + EXTRA.join(", "));
   const lowItems = [
     ...collectLowBoards(boardStock),
     ...collectLowConsumables(consumablesStock),
