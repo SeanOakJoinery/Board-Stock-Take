@@ -26,6 +26,8 @@ async function fetchJson(path) {
   return (await res.json()) || {};
 }
 
+// Today / yesterday as YYYY-MM-DD in South African time.
+function saDay(offsetDays) { return new Date(Date.now() + (offsetDays || 0) * 86400000).toLocaleDateString("en-CA", { timeZone: "Africa/Johannesburg" }); }
 const num = (v) => (isFinite(Number(v)) ? Number(v) : 0);
 function daysSince(ymd) {
   if (!ymd) return 0;
@@ -41,7 +43,8 @@ function lateOrders(orders) {
   Object.entries(orders || {}).forEach(([id, o]) => {
     if (!o || (o.status !== "ordered" && o.status !== "part")) return;
     const days = daysSince(o.orderedDate);
-    if (days < LATE_DAYS) return;
+    // Late = past the delivery date the supplier gave; with no date, a week after ordering.
+    if (o.dueDate ? !(saDay(0) > o.dueDate) : days < LATE_DAYS) return;
     const lines = Object.values(o.lines || {})
       .sort((a, b) => num(a.n) - num(b.n))
       .map((l) => ({ l, out: Math.round((num(l.qty) - num(l.received)) * 100) / 100 }))
@@ -52,7 +55,7 @@ function lateOrders(orders) {
     const key = location.toLowerCase() + "|" + String(o.supplier || "Unknown supplier").trim().toLowerCase();
     groups[key] = groups[key] || { location, supplier: String(o.supplier || "Unknown supplier").trim(), email: o.supplierEmail || "", orders: [] };
     if (!groups[key].email && o.supplierEmail) groups[key].email = o.supplierEmail;
-    groups[key].orders.push({ id, ref: o.ref || "", orderedDate: o.orderedDate, days, lines });
+    groups[key].orders.push({ id, ref: o.ref || "", orderedDate: o.orderedDate, dueDate: o.dueDate || "", days, lines });
   });
   return Object.values(groups)
     .map((g) => ({ ...g, orders: g.orders.sort((a, b) => String(a.orderedDate).localeCompare(String(b.orderedDate))) }))
@@ -65,7 +68,7 @@ function buildMessage(groups) {
   const section = (gs) => gs.map((g) => {
     const head = `${g.supplier}${g.email ? " <" + g.email + ">" : ""}`;
     const body = g.orders.map((o) =>
-      `  ${o.ref ? o.ref + " — " : ""}ordered ${fmtDate(o.orderedDate)} (${o.days} days ago)\n` +
+      `  ${o.ref ? o.ref + " — " : ""}ordered ${fmtDate(o.orderedDate)} (${o.days} days ago)${o.dueDate ? ` — supplier promised ${fmtDate(o.dueDate)}, now ${daysSince(o.dueDate)} day(s) late` : ""}\n` +
       o.lines.map((t) => `    • ${t}`).join("\n")).join("\n");
     return `${head}\n${body}`;
   }).join("\n\n");
@@ -75,7 +78,7 @@ function buildMessage(groups) {
     return `=== ${loc.toUpperCase()} — ${n} order(s) ===\n\n${section(gs)}`;
   });
   const count = groups.reduce((a, g) => a + g.orders.length, 0);
-  return `${day} orders check: ${count} order(s) placed ${LATE_DAYS}+ days ago still have items outstanding.\n\n` +
+  return `${day} orders check: ${count} overdue order(s) — past the supplier's delivery date (or ${LATE_DAYS}+ days since ordering where no date was given) with items still outstanding.\n\n` +
     parts.join("\n\n") +
     `\n\nOpen the Orders app to receive deliveries or close orders that aren't coming:\n${APP_URL}`;
 }
@@ -91,7 +94,7 @@ async function sendEmail(groups, extra) {
       to_email: [env.DIGEST_RECIPIENT_EMAIL].concat(extra || []).join(","),
       cc_email: "",
       from_name: "Orders check",
-      item_name: `Orders check — ${count} order(s) outstanding after a week (${groups.map((g) => g.supplier).join(", ")})`.slice(0, 250),
+      item_name: `Orders check — ${count} overdue order(s) (${groups.map((g) => g.supplier).join(", ")})`.slice(0, 250),
       current_qty: "",
       reorder_qty: "",
       message: buildMessage(groups),
@@ -110,7 +113,15 @@ async function main() {
   const orders = await fetchJson("orders/list");
   const groups = lateOrders(orders);
   if (!groups.length) {
-    console.log("No orders outstanding after a week — no email sent.");
+    console.log("No overdue orders — no email sent.");
+    return;
+  }
+  // Runs every weekday. Monday and Wednesday: the full overdue list. Other days:
+  // only when an order went past its promised delivery date yesterday.
+  const dow = new Date().toLocaleDateString("en-US", { weekday: "short", timeZone: "Africa/Johannesburg" });
+  const newlyLate = groups.some((g) => g.orders.some((o) => o.dueDate === saDay(-1)));
+  if (dow !== "Mon" && dow !== "Wed" && !newlyLate && !env.FORCE_SEND) {
+    console.log("Not Monday/Wednesday and nothing went overdue yesterday — no email sent.");
     return;
   }
   console.log(buildMessage(groups));
