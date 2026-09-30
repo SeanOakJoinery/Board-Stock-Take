@@ -1879,5 +1879,107 @@ function copyLink(link){
 if ('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }
 boot();
 </script>
+<script>
+window.OAK_BACK_TABS = { get: function(){ return (typeof state !== "undefined" && state.currentUser) ? state.tab : null; }, set: function(t){ state.tab = t; render(); window.scrollTo(0,0); } };
+/* Oak Joinery — shared "← Back" button (2026-09-30, per Sean: "let's put back
+   buttons in all apps"). Adds a Back button next to every "☰ Menu" button and
+   makes the phone's own back button do the same thing. Back goes, in order:
+     1. out of an open pop-up (a delivery note opened from the list goes back
+        to the list),
+     2. to the previous screen in the app (Orders / Tools detail pages, or the
+        last tab you were on),
+     3. to the Oak Joinery menu.
+   Apps can tell it about their tabs with window.OAK_BACK_TABS = { get, set }. */
+(function(){
+  "use strict";
+  if (window.__oakBack) return; window.__oakBack = true;
+  var tabStack = [], lastTab = null, goingBack = false;
+
+  function visible(el){
+    if (!el || !el.isConnected) return false;
+    var cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden") return false;
+    var r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+  var OVERLAYS = "#noteBg, #allBg, .modal-bg, .modal-overlay, .mbg, #modal-root .modal-backdrop, #modal-root > div";
+  function topOverlay(){
+    var list = Array.prototype.slice.call(document.querySelectorAll(OVERLAYS)).filter(visible)
+      .filter(function(el){ return el.id !== "loginOverlay" && !el.closest("#loginOverlay") && !/login/i.test(el.id || ""); });
+    return list.length ? list[list.length - 1] : null;
+  }
+  function closeButtonIn(el){
+    var b = el.querySelector(".note-back");
+    if (b && visible(b)) return b;
+    var btns = Array.prototype.slice.call(el.querySelectorAll("button")).filter(visible);
+    return btns.find(function(x){ return /(^|\s)(close-x|modal-close)(\s|$)/.test(x.className) || x.id === "mCancel" || x.id === "modal-cancel"; }) ||
+           btns.find(function(x){ return /^\s*(cancel|close|done|back|×|✕)\s*$/i.test(x.textContent); }) || null;
+  }
+  function goMenu(){
+    try { if (window.OakCore && OakCore.session && OakCore.session.get()) { OakCore.session.goHome(); return; } } catch (e) {}
+    location.href = "https://seanoakjoinery.github.io/oak-core/";
+  }
+  function back(){
+    var ov = topOverlay();
+    if (ov){
+      var b = closeButtonIn(ov);
+      if (b){ b.click(); return true; }
+      if (typeof window.closeModal === "function"){ window.closeModal(); return true; }
+      ov.remove(); return true;
+    }
+    var link = Array.prototype.slice.call(document.querySelectorAll(".backlink#back, #back.backlink")).filter(visible)[0];
+    if (link){ link.click(); return true; }
+    var T = window.OAK_BACK_TABS;
+    if (T && tabStack.length){
+      goingBack = true;
+      var t = tabStack.pop(); lastTab = t;
+      try { T.set(t); } finally { goingBack = false; }
+      return true;
+    }
+    goMenu(); return false;
+  }
+  window.oakBack = back;
+
+  // Remember the tab you came from.
+  function trackTab(){
+    var T = window.OAK_BACK_TABS; if (!T) return;
+    var cur; try { cur = T.get(); } catch (e) { return; }
+    if (cur === undefined || cur === null) return;
+    if (lastTab !== null && cur !== lastTab && !goingBack){ tabStack.push(lastTab); if (tabStack.length > 30) tabStack.shift(); }
+    lastTab = cur;
+  }
+
+  // Put a Back button in front of every Menu button (apps redraw, so keep checking).
+  function addButtons(){
+    var menus = Array.prototype.slice.call(document.querySelectorAll("button, a")).filter(function(x){
+      return /☰\s*Menu/.test(x.textContent || "") && !x.dataset.oakBackDone;
+    });
+    menus.forEach(function(m){
+      m.dataset.oakBackDone = "1";
+      var b = document.createElement(m.tagName === "A" ? "button" : m.tagName);
+      b.type = "button";
+      b.className = m.className;
+      b.setAttribute("style", (m.getAttribute("style") || "") + ";margin-right:6px");
+      b.textContent = "← Back";
+      b.title = "Back to the previous screen";
+      b.addEventListener("click", function(e){ e.preventDefault(); e.stopPropagation(); back(); });
+      m.parentNode.insertBefore(b, m);
+    });
+  }
+  function tick(){ addButtons(); trackTab(); }
+  new MutationObserver(tick).observe(document.documentElement, { childList:true, subtree:true });
+  document.addEventListener("click", function(){ setTimeout(trackTab, 0); }, true);
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", tick); else tick();
+
+  // The phone's own back button does the same as the Back button.
+  try {
+    history.pushState({ oakBack:1 }, "");
+    window.addEventListener("popstate", function(){
+      var stay = back();
+      if (stay) history.pushState({ oakBack:1 }, "");
+    });
+  } catch (e) {}
+})();
+</script>
 </body>
 </html>
