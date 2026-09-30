@@ -899,7 +899,7 @@ function visibleTabs(){
   if (can("boardAddBoard")) tabs.push({ key:"boards", label:"Boards", icon:"➕" });
   if (can("boardViewLog")) tabs.push({ key:"log", label:"Log", icon:"📋" });
   if (can("boardViewLog")) tabs.push({ key:"cuttinglog", label:"Cutting Log", icon:"✂️" });
-  if (can("manageUsers")) tabs.push({ key:"users", label:"Users", icon:"👤" });
+  // 2026-09-30: users are managed only in the separate Users app.
   if (can("boardSettings")) tabs.push({ key:"settings", label:"Settings", icon:"⚙️" });
   if (can("boardSettings")) tabs.push({ key:"suppliers", label:"Suppliers", icon:"🚚" });
   return tabs;
