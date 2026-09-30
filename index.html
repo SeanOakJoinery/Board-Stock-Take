@@ -1380,91 +1380,30 @@ async function submitSendToDispatch(){
    want that to work the same" — mirrors the Consumables app's Suppliers
    tab exactly, so the weekly reorder digest script can group boards by
    supplier the same way it groups screws/consumables). ---------------- */
+const SUPPLIERS_APP = "https://seanoakjoinery.github.io/oak-core/suppliers/";
+// Suppliers are added / edited only in the Suppliers app (2026-09-30). This tab just shows them.
 function renderSuppliersTab(){
-  const suppliers = Object.entries(state.data.suppliers || {}).sort((a,b)=> a[1].name.localeCompare(b[1].name));
+  const suppliers = Object.entries(state.data.suppliers || {}).sort((a,b)=> String(a[1].name).localeCompare(String(b[1].name)));
   const rows = suppliers.map(([sid, s]) => {
     const assigned = state.data.boards.filter(b => b.supplierId === sid);
     const low = assigned.filter(needsReorder).length;
+    const phone = [s.tel, s.cell].filter(Boolean).map(n => `<a href="tel:${esc(String(n).replace(/[^\d+]/g,''))}" style="color:var(--amber, #e0a33a);">${esc(n)}</a>`).join(' · ');
     return `
       <div class="user-row">
         <div>
           <div style="font-weight:600;">${esc(s.name)}</div>
-          <div class="small-muted">${esc(s.contactPerson||'—')} · ${esc(s.email||'—')}${s.ccEmail ? ' · cc ' + esc(s.ccEmail) : ''}</div>
-          <div class="small-muted">${assigned.length} board(s) assigned${low>0 ? ` · <span style="color:#e17e5b;">${low} need reordering</span>` : ''}</div>
+          <div class="small-muted">${esc(s.contactPerson||'—')} · ${esc(s.email||'—')}${s.ccEmail ? ' · cc ' + esc(s.ccEmail) : ''}${phone ? ' · ' + phone : ''}</div>
+          <div class="small-muted">${assigned.length} board(s) assigned${low>0 ? ` · <span style="color:#e17e5b;">${low} need reordering</span>` : ''}${s.sendDirect ? ' · weekly reorder goes straight to them' : ''}</div>
         </div>
-        <button class="btn btn-ghost btn-sm" onclick="openEditSupplier('${sid}')">Edit</button>
       </div>`;
   }).join("");
   return `
     <div class="card">
       <h2 style="margin-top:0;">Suppliers</h2>
-      <p class="small-muted">Assign a supplier to each board so the weekly reorder digest sends one email per supplier, listing only their boards.</p>
-      <div class="stack">${rows || '<div class="empty">No suppliers added yet.</div>'}</div>
-      <button class="btn btn-primary" style="margin-top:14px;" onclick="openAddSupplier()">+ Add supplier</button>
+      <p class="small-muted">Assign a supplier to each board so the weekly reorder digest sends one email per supplier, listing only their boards. Suppliers are added and edited in the <b>Suppliers</b> app — changes show up here straight away.</p>
+      <div class="stack">${rows || '<div class="empty">No suppliers yet — add them in the Suppliers app and tick “Board Stock”.</div>'}</div>
+      <a class="btn btn-primary" style="margin-top:14px;display:inline-block;text-decoration:none;" href="${SUPPLIERS_APP}">🚚 Open the Suppliers app</a>
     </div>`;
-}
-function openAddSupplier(){
-  openModal(`
-    <h3>Add supplier</h3>
-    <label>Supplier name</label><input type="text" id="sp-name">
-    <label>Contact person</label><input type="text" id="sp-contact">
-    <label>Reorder email address</label><input type="text" id="sp-email">
-    <label>CC email (optional)</label><input type="text" id="sp-cc">
-    <label style="display:flex;align-items:center;gap:7px;font-weight:400;margin-top:10px;"><input type="checkbox" id="sp-direct" style="width:auto;"> Send the weekly digest straight to this supplier (skip reviewing it yourself first)</label>
-    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitAddSupplier()">Add supplier</button></div>
-  `);
-}
-async function submitAddSupplier(){
-  const name = document.getElementById("sp-name").value.trim();
-  const contactPerson = document.getElementById("sp-contact").value.trim();
-  const email = document.getElementById("sp-email").value.trim();
-  const ccEmail = document.getElementById("sp-cc").value.trim();
-  const sendDirect = document.getElementById("sp-direct").checked;
-  if(!name){ toast("Enter a supplier name.", "error"); return; }
-  const ok = await mutate((data) => {
-    if(!data.suppliers) data.suppliers = {};
-    data.suppliers[uid()] = { name, contactPerson, email, ccEmail, sendDirect };
-    return data;
-  }, `${name} added.`);
-  if(ok) closeModal();
-}
-function openEditSupplier(sid){
-  const s = state.data.suppliers[sid];
-  openModal(`
-    <h3>Edit ${esc(s.name)}</h3>
-    <label>Supplier name</label><input type="text" id="sp-name" value="${esc(s.name)}">
-    <label>Contact person</label><input type="text" id="sp-contact" value="${esc(s.contactPerson||'')}">
-    <label>Reorder email address</label><input type="text" id="sp-email" value="${esc(s.email||'')}">
-    <label>CC email (optional)</label><input type="text" id="sp-cc" value="${esc(s.ccEmail||'')}">
-    <label style="display:flex;align-items:center;gap:7px;font-weight:400;margin-top:10px;"><input type="checkbox" id="sp-direct" style="width:auto;" ${s.sendDirect?'checked':''}> Send the weekly digest straight to this supplier (skip reviewing it yourself first)</label>
-    <div class="modal-actions">
-      <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn" style="background:var(--red);color:#fff;" onclick="deleteSupplier('${sid}')">Delete</button>
-      <button class="btn btn-primary" onclick="submitEditSupplier('${sid}')">Save</button>
-    </div>
-  `);
-}
-async function submitEditSupplier(sid){
-  const name = document.getElementById("sp-name").value.trim();
-  const contactPerson = document.getElementById("sp-contact").value.trim();
-  const email = document.getElementById("sp-email").value.trim();
-  const ccEmail = document.getElementById("sp-cc").value.trim();
-  const sendDirect = document.getElementById("sp-direct").checked;
-  if(!name){ toast("Enter a supplier name.", "error"); return; }
-  const ok = await mutate((data) => {
-    data.suppliers[sid] = { name, contactPerson, email, ccEmail, sendDirect };
-    return data;
-  }, "Supplier updated.");
-  if(ok) closeModal();
-}
-async function deleteSupplier(sid){
-  if(!confirm("Delete this supplier? Boards assigned to them will show as unassigned.")) return;
-  const ok = await mutate((data) => {
-    delete data.suppliers[sid];
-    data.boards.forEach(b => { if(b.supplierId === sid) b.supplierId = ""; });
-    return data;
-  }, "Supplier removed.");
-  if(ok) closeModal();
 }
 function supplierSelectHtml(id, selectedId){
   const suppliers = Object.entries(state.data.suppliers || {}).sort((a,b)=> a[1].name.localeCompare(b[1].name));
