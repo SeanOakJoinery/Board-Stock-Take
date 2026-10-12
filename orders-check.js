@@ -49,6 +49,13 @@ async function authToken() {
     const j = await r.json();
     AUTH_TOKEN = j.idToken || "";
     if (!AUTH_TOKEN) console.warn("Anonymous sign-in failed: " + ((j.error && j.error.message) || r.status));
+    if (AUTH_TOKEN && process.env.OAK_ROBOT_KEY) {
+      // PIN lock (2026-10-10): this run logs in with the email jobs key, the way staff log in with their PIN.
+      const pin = require("crypto").createHash("sha256").update(process.env.OAK_ROBOT_KEY.trim()).digest("hex");
+      const rr = await fetch(`${process.env.FIREBASE_DB_URL}/oakSessions/${j.localId}.json?auth=${AUTH_TOKEN}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user: "robot", pin, ts: { ".sv": "timestamp" } }) });
+      if (!rr.ok) console.warn("The email jobs key was refused (" + rr.status + ") — make a new key in the Users app and update the OAK_ROBOT_KEY secret.");
+    } else if (AUTH_TOKEN) console.warn("No OAK_ROBOT_KEY secret yet — fine until the PIN lock rules are switched on.");
   } catch (e) { console.warn("Anonymous sign-in failed: " + e.message); AUTH_TOKEN = ""; }
   return AUTH_TOKEN;
 }

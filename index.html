@@ -137,20 +137,24 @@
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
 <script>
-/* Oak Joinery — Firebase sign-in guard (2026-10-07).
-   The database is being locked so only signed-in apps can read or write it
-   (Firebase warned that anyone with the address could). Staff still only use
-   their PIN: every app signs in to Firebase anonymously in the background.
-   Every database call (on / once / set / update / push / remove / transaction)
-   waits until that app's sign-in has finished, so nothing is refused while
-   the sign-in is still happening. If anonymous sign-in isn't switched on yet,
-   or takes too long, the calls carry on as before — so this file is safe to
-   upload before the new database rules go in. */
+/* Oak Joinery — Firebase sign-in guard (v2, 2026-10-10: PIN lock).
+   Every app signs in to Firebase anonymously in the background, and every
+   database call (on / once / set / update / push / remove / transaction)
+   waits until that sign-in has finished.
+   PIN lock: once signed in, if someone is logged in on this device (the
+   shared Oak session: user id + PIN hash), this device is registered under
+   oakSessions/<its Firebase id>. The database rules only let a device read or
+   write when that registration matches the user's PIN in the locked pins/
+   store — so an outsider who only has the app's public key gets nothing.
+   If the registration is refused (PIN changed, user removed) the person is
+   sent back to the menu to log in again. If anonymous sign-in fails or takes
+   too long, the calls carry on as before. */
 (function(){
   "use strict";
   if (window.__oakAuthGuard || !window.firebase || !firebase.database) return;
-  window.__oakAuthGuard = true;
+  window.__oakAuthGuard = 2;
   var state = {};   // app name -> { ready, queue }
+  var set0 = null;  // the real Reference.set (before it is made to wait)
   function appOf(ref){
     try { return (ref && ref.database && ref.database.app) || firebase.app(); } catch (e) { return null; }
   }
@@ -164,13 +168,36 @@
     var q = s.queue; s.queue = [];
     q.forEach(function(f){ try { f(); } catch (e) { console.error(e); } });
   }
+  function localSession(){
+    try { var x = JSON.parse(localStorage.getItem("oakSession")); return x && x.id && x.pin && x.exp && Date.now() < x.exp ? x : null; } catch (e) { return null; }
+  }
+  function denied(e){ return /permission/i.test(String((e && (e.code || e.message)) || e)); }
+  function rejected(){
+    try { localStorage.removeItem("oakSession"); } catch (e) {}
+    try { window.dispatchEvent(new Event("oak-session-rejected")); } catch (e) {}
+    if (!/\/oak-core\/?(index\.html)?$/.test(location.pathname)) location.href = "/oak-core/?logout=1";
+  }
+  // Register this device's sign-in for the logged-in person, then let the queued calls go.
+  function register(app, u, s){
+    var x = localSession();
+    if (!x || !set0) { release(s); return; }
+    var done = false, t = setTimeout(function(){ if (!done) { done = true; release(s); } }, 8000);
+    var ref = firebase.database(app).ref("oakSessions/" + u.uid);
+    set0.call(ref, { user:String(x.id), pin:String(x.pin), ts:firebase.database.ServerValue.TIMESTAMP }).then(function(){
+      if (!done) { done = true; clearTimeout(t); release(s); }
+    }, function(e){
+      console.warn("Oak: this device's login was refused (" + ((e && e.code) || e) + ")");
+      if (!done) { done = true; clearTimeout(t); release(s); }
+      if (denied(e)) rejected();
+    });
+  }
   function signIn(app, s){
     if (!app || !firebase.auth) { release(s); return; }
     var a; try { a = firebase.auth(app); } catch (e) { release(s); return; }
     var timer = setTimeout(function(){ console.warn("Oak: Firebase sign-in is slow — carrying on"); release(s); }, 8000);
-    var asked = false;
+    var asked = false, seen = false;
     a.onAuthStateChanged(function(u){
-      if (u) { clearTimeout(timer); release(s); return; }
+      if (u) { if (seen) return; seen = true; clearTimeout(timer); register(app, u, s); return; }
       if (asked) return; asked = true;
       a.signInAnonymously().catch(function(e){ console.warn("Oak: anonymous sign-in not available (" + (e && e.code) + ")"); clearTimeout(timer); release(s); });
     });
@@ -182,6 +209,7 @@
   }
   var DB = firebase.database, Q = DB.Query && DB.Query.prototype, R = DB.Reference && DB.Reference.prototype;
   if (!Q || !R) return;
+  set0 = R.set;
   var on0 = Q.on, off0 = Q.off;
   Q.on = function(ev, cb){ var self = this, a = arguments; when(self, function(){ on0.apply(self, a); }); return cb; };
   Q.off = function(){ var self = this, a = arguments; when(self, function(){ off0.apply(self, a); }); };
@@ -196,7 +224,7 @@
   };
 })();
 </script>
-<script src="https://seanoakjoinery.github.io/oak-core/oak-core.js?v=3"></script>
+<script src="https://seanoakjoinery.github.io/oak-core/oak-core.js?v=4"></script>
 <script>/* ONE LOGIN (oak-core v3): no session on this device -> log in on the Oak Joinery home app first. Add ?local=1 to the URL to use this app's own login screen instead. */
 (function(){try{var S=window.OakCore&&OakCore.session;if(S&&!S.get()&&!S.localLoginAllowed())S.goHome({next:'boardStock'});}catch(e){}})();</script>
 <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
@@ -942,7 +970,7 @@ async function submitLogin(){
   const pin = document.getElementById("login-pin").value;
   const user = state.sharedUsers.find(u => u.id === state.loginUserId);
   const enteredHash = await hashPin(pin);
-  if (!user || enteredHash !== user.pin){
+  if (!user || !(await OakCore.checkPinHash(user.id, enteredHash, user).catch(() => false))){
     state.loginError = "Incorrect PIN — try again.";
     render();
     setTimeout(()=>document.getElementById("login-pin")?.focus(), 50);
@@ -967,6 +995,7 @@ function visibleTabs(){
   if (can("boardRemoveQty")) tabs.push({ key:"removeqty", label:"Remove", icon:"📤" });
   if (can("boardAddQty") && can("boardRemoveQty")) tabs.push({ key:"count", label:"Stock Count", icon:"🔢" });
   if (can("boardSendToDispatch")) tabs.push({ key:"dispatch", label:"Send to Dispatch", icon:"🚚" });
+  if (can("boardSendToDispatch")) tabs.push({ key:"transfer", label:"Transfer", icon:"🔁" });
   if (can("boardAddBoard")) tabs.push({ key:"boards", label:"Boards", icon:"➕" });
   if (can("boardViewLog")) tabs.push({ key:"log", label:"Log", icon:"📋" });
   if (can("boardViewLog")) tabs.push({ key:"cuttinglog", label:"Cutting Log", icon:"✂️" });
@@ -984,6 +1013,7 @@ function renderShell(){
   else if (state.tab === "removeqty") content = renderRemoveQty();
   else if (state.tab === "count") content = renderStockCount();
   else if (state.tab === "dispatch") content = renderSendToDispatch();
+  else if (state.tab === "transfer") content = renderTransfer();
   else if (state.tab === "boards") content = renderBoardsAdmin();
   else if (state.tab === "log") content = renderLog();
   else if (state.tab === "cuttinglog") content = renderCuttingLog();
@@ -1446,6 +1476,108 @@ async function submitSendToDispatch(){
   state.busy = false; render();
 }
 
+/* ---------------- TRANSFER (2026-10-12, per user request: "i want a transfer
+   to head office or to other location and with the transfer it sends it
+   straight to delivery notes"). Moves boards from one branch to another
+   branch (or out to somewhere else, e.g. head office) and creates a
+   delivery note in the Dispatch app straight away, ready for the driver
+   and the person receiving to sign. ---------------- */
+let transferForm = { from:"", to:"", other:"", ref:"", lines:[{ code:"", qty:1 }] };
+function trLocations(){ return state.data.locations && state.data.locations.length ? state.data.locations : ["Main"]; }
+function renderTransfer(){
+  const f = transferForm, locs = trLocations();
+  if (!f.from || locs.indexOf(f.from) < 0) f.from = locs[0];
+  const tos = locs.filter(l => l !== f.from);
+  if (f.to !== "__other" && tos.indexOf(f.to) < 0) f.to = tos[0] || "__other";
+  const boards = [...state.data.boards].sort((a,b)=>a.code.localeCompare(b.code));
+  const lineRow = (l, i) => `
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <select style="flex:1" onchange="transferForm.lines[${i}].code=this.value; render()">
+          <option value="">— pick a board —</option>
+          ${boards.map(b=>`<option value="${esc(b.code)}" ${b.code===l.code?"selected":""}>${esc(boardName(b))} — ${(b.qty && b.qty[f.from]) || 0} at ${esc(f.from)}</option>`).join("")}
+        </select>
+        <input type="number" min="1" step="1" value="${esc(l.qty)}" style="width:80px" oninput="transferForm.lines[${i}].qty=this.value">
+        ${f.lines.length > 1 ? `<button class="btn btn-ghost btn-sm" onclick="transferForm.lines.splice(${i},1); render()">✕</button>` : ""}
+      </div>`;
+  return `
+    <div class="card">
+      <h2 style="margin-top:0;">Transfer boards</h2>
+      <p class="small-muted">Takes the boards off the branch they leave from, adds them to the branch they go to, and makes a delivery note in Dispatch straight away — ready for the driver and the person receiving them to sign.</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div><label>From</label><select onchange="transferForm.from=this.value; render()">${locs.map(l=>`<option ${l===f.from?"selected":""}>${esc(l)}</option>`).join("")}</select></div>
+        <div><label>To</label><select onchange="transferForm.to=this.value; render()">${tos.map(l=>`<option ${l===f.to?"selected":""}>${esc(l)}</option>`).join("")}<option value="__other" ${f.to==="__other"?"selected":""}>Somewhere else (e.g. head office)…</option></select></div>
+      </div>
+      ${f.to === "__other" ? `<label>Where to</label><input type="text" value="${esc(f.other)}" placeholder="e.g. Head office" oninput="transferForm.other=this.value">
+        <div class="small-muted" style="margin-top:4px">Not one of your branches, so the boards just leave ${esc(f.from)}'s stock.</div>` : ""}
+      <label style="margin-top:12px">Boards</label>
+      ${f.lines.map(lineRow).join("")}
+      <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="transferForm.lines.push({code:'',qty:1}); render()">＋ Another board</button>
+      <label style="margin-top:12px">Reference / note (optional)</label>
+      <input type="text" value="${esc(f.ref)}" placeholder="e.g. for the NH Hotel job" oninput="transferForm.ref=this.value">
+      <button class="btn btn-primary btn-block" style="margin-top:18px;" onclick="submitTransfer()" ${state.busy?"disabled":""}>${state.busy?"Transferring…":"🔁 Transfer & make delivery note"}</button>
+    </div>`;
+}
+async function submitTransfer(){
+  if(!can("boardSendToDispatch")) return;
+  const f = transferForm, from = f.from, toBranch = f.to !== "__other", to = toBranch ? f.to : String(f.other || "").trim();
+  if (!to){ toast("Where are the boards going?", "error"); return; }
+  const lines = f.lines.map(l => ({ code:l.code, qty:parseInt(l.qty, 10) })).filter(l => l.code);
+  if (!lines.length){ toast("Pick at least one board.", "error"); return; }
+  if (lines.some(l => !l.qty || l.qty <= 0)){ toast("Enter a quantity for every board.", "error"); return; }
+  if (new Set(lines.map(l => l.code)).size !== lines.length){ toast("A board is in the list twice — put it on one line.", "error"); return; }
+  if (!dispatchBoardRef){ toast("Not connected to the Dispatch app yet — try again in a moment.", "error"); return; }
+  const short = lines.map(l => { const b = findBoard(state.data, l.code); const here = (b && b.qty && b.qty[from]) || 0; return here < l.qty ? `${boardName(b)}: only ${here} at ${from}` : ""; }).filter(Boolean);
+  if (short.length && !confirm("Not enough on hand:\n" + short.join("\n") + "\n\nTransfer anyway? Stock at " + from + " will show as negative.")) return;
+  const list = lines.map(l => { const b = findBoard(state.data, l.code); return "• " + l.qty + " × " + (b ? boardName(b) : l.code); }).join("\n");
+  if (!confirm("Transfer from " + from + " to " + to + " and make a delivery note?\n\n" + list)) return;
+  const who = state.currentUser.username, ref = String(f.ref || "").trim();
+  const today = new Date().toLocaleDateString("en-GB", {day:"2-digit", month:"long", year:"numeric"});
+  state.busy = true; render();
+  try{
+    // 1. the delivery note in Dispatch (its number comes from Dispatch's own counter)
+    const noteId = uid(); let number = "";
+    const res = await dispatchBoardRef.transaction(cur => {
+      cur = cur || {};
+      const asList = v => Array.isArray(v) ? v.filter(x => x != null) : (v && typeof v === "object" ? Object.values(v) : []);
+      const items = asList(cur.items), notes = asList(cur.notes), nextNo = Number(cur.nextNo) || (notes.length + 1);
+      number = "DN-" + String(nextNo).padStart(4, "0");
+      const noteItems = lines.map(l => {
+        const b = findBoard(state.data, l.code);
+        const it = { id: uid() + l.code, type: b ? b.description : l.code, qty: l.qty, ref: "Transfer " + from + " → " + to + (ref ? " — " + ref : ""),
+          status: "dispatched", addedDate: today, vinagedDate: today, readyDate: today, dispatchedDate: today, noteId,
+          transfer: { from, to, sourceApp: "boardStock", boardCode: l.code } };
+        items.push(it);
+        return { stockItemId: it.id, type: it.type, qty: it.qty, ref: it.ref };
+      });
+      notes.push({ id: noteId, number, date: today, customer: (toBranch ? "Oak Joinery — " : "") + to, items: noteItems, isCollection: false,
+        driverSignature: null, driverSignedDate: null, driverName: "", vehicleReg: "", siteSignature: null, siteSignedDate: null, siteSignedBy: "",
+        transfer: { from, to, by: who, sourceApp: "boardStock" } });
+      cur.items = items; cur.notes = notes; cur.nextNo = nextNo + 1;
+      return cur;
+    });
+    if (!res || !res.committed) throw new Error("Dispatch didn't save");
+    // 2. the stock: off "from", onto "to" when it's one of the branches
+    const ok = await mutate((data) => {
+      lines.forEach(l => {
+        const b = findBoard(data, l.code); if (!b) return;
+        if (typeof b.qty !== "object" || !b.qty) b.qty = {};
+        b.qty[from] = (b.qty[from] || 0) - l.qty;
+        if (toBranch) b.qty[to] = (b.qty[to] || 0) + l.qty;
+        checkReorder(data, b);
+        data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: l.code, action: "transfer", qtyChange: toBranch ? 0 : -l.qty, resultingQty: totalQty(b),
+          reason: `Transfer ${l.qty} ${from} → ${to} (${number})${ref ? " — " + ref : ""}` });
+      });
+      return data;
+    }, null);
+    if (!ok) { toast("Delivery note " + number + " was made in Dispatch, but the stock didn't update — adjust it with Add / Remove.", "error"); state.busy = false; render(); return; }
+    toast(`Transferred to ${to} — delivery note ${number} is in Dispatch, ready to sign.`, "ok");
+    transferForm = { from, to: f.to, other: f.other, ref:"", lines:[{ code:"", qty:1 }] };
+  } catch(e){
+    toast("Could not reach the Dispatch app — nothing was transferred. Check your connection and try again.", "error");
+  }
+  state.busy = false; render();
+}
+
 /* ---------------- SUPPLIERS (added 2026-09-22, per user request: "boards
    dont work the same as consumables when it comes to the email section i
    want that to work the same" — mirrors the Consumables app's Suppliers
@@ -1724,7 +1856,8 @@ async function submitNewUser(){
   const apps = currentUserIsMainRoot()
     ? Object.fromEntries([...document.querySelectorAll(".nu-app")].map(cb => [cb.dataset.app, cb.checked]))
     : defaultApps();
-  state.sharedUsers.push({ id: uid(), username, pin: await hashPin(pin), isRoot: false, permissions, apps });
+  const nid = uid(); await OakCore.setPin(nid, pin);
+  state.sharedUsers.push({ id: nid, username, isRoot: false, permissions, apps });
   await saveSharedUsers();
   toast(`${username} added.`);
   render();
@@ -1770,7 +1903,7 @@ async function submitEditUser(id){
     ? Object.fromEntries([...document.querySelectorAll(".eu-app")].map(cb => [cb.dataset.app, cb.checked]))
     : (u.apps || defaultApps());
   u.username = username;
-  if (pin) u.pin = await hashPin(pin);
+  if (pin){ await OakCore.setPin(u.id, pin); delete u.pin; }
   // Merge, don't replace — replacing wiped this person's permissions in
   // the other three apps (Dispatch, Stock List, Consumables).
   u.permissions = { ...(u.permissions || {}), ...permissions };
@@ -1788,7 +1921,7 @@ async function deleteUser(id){
   if (target.isRoot && state.sharedUsers.filter(u=>u.isRoot).length <= 1){ toast("You can't delete the only root account — make another user root first.", "error"); return; }
   if (id === (state.currentUser && state.currentUser.id)){ toast("You can't delete the account you're logged in as.", "error"); return; }
   if (!confirm("Remove this user? They'll no longer be able to log in to any app.")) return;
-  state.sharedUsers = state.sharedUsers.filter(x=>x.id!==id);
+  state.sharedUsers = state.sharedUsers.filter(x=>x.id!==id); if(window.OakCore && OakCore.removePin) OakCore.removePin(id);
   await saveSharedUsers();
   toast("User removed.");
   closeModal();
