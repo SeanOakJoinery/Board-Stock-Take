@@ -22,4 +22,5 @@ jobs:
           EMAILJS_PUBLIC_KEY: ${{ secrets.EMAILJS_PUBLIC_KEY }}
           EMAILJS_PRIVATE_KEY: ${{ secrets.EMAILJS_PRIVATE_KEY }}
           DIGEST_RECIPIENT_EMAIL: ${{ secrets.DIGEST_RECIPIENT_EMAIL }}
+          OAK_ROBOT_KEY: ${{ secrets.OAK_ROBOT_KEY }}
           FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
