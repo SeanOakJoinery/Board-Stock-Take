@@ -629,7 +629,27 @@ function emptyData(){
 // list — nothing is lost on upgrade.
 function totalQty(board){
   if(typeof board.qty === 'number') return board.qty; // not yet migrated
-  return Object.values(board.qty || {}).reduce((a,b)=>a+(Number(b)||0), 0);
+  return Math.round(Object.values(board.qty || {}).reduce((a,b)=>a+(Number(b)||0), 0) * 1000) / 1000;
+}
+/* ---------------- SOLID WOOD (2026-10-13, per user request: "in the board
+   stocks i want a solid wood section to keep stock of solid wood and reorder
+   lists"). Solid wood items live in the same boards list (kind:"solid"), so
+   Add / Remove / Count / Send to Dispatch / Transfer / Orders / Stock In and
+   the weekly reorder email all work for them. Each item is counted in
+   pieces, cubic metres or linear metres (m³ and lm allow decimals). ---------------- */
+const SOLID_UNITS = { pcs:"pieces", "m³":"cubic metres (m³)", lm:"linear metres (lm)" };
+function isSolid(b){ return !!b && b.kind === "solid"; }
+function decUnit(b){ return isSolid(b) && (b.unit === "m³" || b.unit === "lm"); }
+function r3(n){ return Math.round((Number(n) || 0) * 1000) / 1000; }
+function readQty(code, raw){
+  const b = findBoard(state.data, code), v = parseFloat(String(raw == null ? "" : raw).replace(",", "."));
+  if (!isFinite(v)) return NaN;
+  return decUnit(b) ? r3(v) : parseInt(raw, 10);
+}
+// a board picker with the solid wood in its own group
+function boardOptions(list, optFn){
+  const boards = list.filter(b => !isSolid(b)), solid = list.filter(isSolid);
+  return (solid.length ? `<optgroup label="Boards">` : "") + boards.map(optFn).join("") + (solid.length ? `</optgroup><optgroup label="Solid wood">${solid.map(optFn).join("")}</optgroup>` : "");
 }
 function qtyAt(board, location){
   if(typeof board.qty === 'number') return location === (state.data.locations||["Main"])[0] ? board.qty : 0;
@@ -990,7 +1010,7 @@ function logout(){
 
 /* ---------------- APP SHELL ---------------- */
 function visibleTabs(){
-  const tabs = [{ key:"stock", label:"Stock", icon:"🪵" }];
+  const tabs = [{ key:"stock", label:"Stock", icon:"🪵" }, { key:"solid", label:"Solid wood", icon:"🌳" }];
   if (can("boardAddQty")) tabs.push({ key:"addqty", label:"Add", icon:"📥" });
   if (can("boardRemoveQty")) tabs.push({ key:"removeqty", label:"Remove", icon:"📤" });
   if (can("boardAddQty") && can("boardRemoveQty")) tabs.push({ key:"count", label:"Stock Count", icon:"🔢" });
@@ -1009,6 +1029,7 @@ function renderShell(){
   if (!tabs.find(t => t.key === state.tab)) state.tab = "stock";
   let content = "";
   if (state.tab === "stock") content = renderStock();
+  else if (state.tab === "solid") content = renderSolid();
   else if (state.tab === "addqty") content = renderAddQty();
   else if (state.tab === "removeqty") content = renderRemoveQty();
   else if (state.tab === "count") content = renderStockCount();
@@ -1046,12 +1067,13 @@ async function retrySync(){
 function renderStock(){
   const q = state.boardSearch.toLowerCase();
   const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
-  const allBoards = state.data.boards
+  const allBoards = state.data.boards.filter(b => !isSolid(b))
     .filter(b => !q || b.code.toLowerCase().includes(q) || b.description.toLowerCase().includes(q) || (b.category||"").toLowerCase().includes(q))
     .sort((a,b) => a.code.localeCompare(b.code));
-  const total = state.data.boards.length;
-  const low = state.data.boards.filter(needsReorder).length;
-  const stockCount = state.data.boards.filter(b => !isJobBoard(b)).length;
+  const onlyBoards = state.data.boards.filter(b => !isSolid(b));
+  const total = onlyBoards.length;
+  const low = onlyBoards.filter(needsReorder).length;
+  const stockCount = onlyBoards.filter(b => !isJobBoard(b)).length;
 
   // Sectioned by location per user request ("i want a kramaville section
   // and a boksburg section or wherever else i need it to be") — each
@@ -1097,6 +1119,106 @@ function renderStock(){
       ${can("boardExportData") ? `<button class="btn" id="share-pdf-btn" onclick="generateAndSharePdf()">Print / Share PDF</button>` : ""}
     </div>
     ${sectionsHtml}`;
+}
+
+function renderSolid(){
+  const q = (state.solidSearch || "").toLowerCase();
+  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
+  const all = state.data.boards.filter(isSolid);
+  const list = all.filter(b => !q || `${b.code} ${b.description} ${b.category||''} ${b.species||''}`.toLowerCase().includes(q))
+    .sort((a,b) => (a.species||a.description).localeCompare(b.species||b.description) || (Number(a.thickness)||0) - (Number(b.thickness)||0) || (Number(a.width)||0) - (Number(b.width)||0));
+  const low = all.filter(needsReorder);
+  const canPick = can("boardRemoveQty");
+  const sections = locations.map((loc, i) => `
+    <details class="location-section" ${i===0 ? 'open' : ''}>
+      <summary>${esc(loc)} <span class="small-muted">(${list.length} item${list.length===1?'':'s'})</span></summary>
+      <div class="board-grid">
+        ${list.map(b => { const here = r3(qtyAt(b, loc)), isLow = needsReorder(b);
+          return `<div class="board-card ${isLow?'reorder':''} ${canPick?'pick':''}" ${canPick?`onclick="pickBoardToRemove('${esc(b.code)}','${esc(loc).replace(/'/g,"\\'")}')"`:''}>
+            <div class="board-desc">${esc(b.description)}</div>
+            <div class="board-meta">${esc(b.category||'Solid wood')}</div>
+            <div class="board-bottom"><div><span class="big-num">${here}</span> <span class="unit-tag">${esc(b.unit)}</span></div>
+              <span class="badge ${isLow?'badge-reorder':'badge-ok'}"><span class="dot ${isLow?'dot-reorder':'dot-ok'}"></span>${isLow?'Reorder':'OK'}</span></div>
+            <div class="small-muted">Total ${totalQty(b)} ${esc(b.unit)} · reorder at ${b.reorderLevel}</div>
+            ${can("boardAddBoard") ? `<button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="event.stopPropagation(); openEditBoard('${esc(b.code)}')">Edit</button>` : ''}
+          </div>`; }).join("") || `<div class="empty">${q ? 'Nothing matches "' + esc(state.solidSearch) + '".' : 'No solid wood yet' + (can("boardAddBoard") ? ' — tap “＋ Add solid wood”.' : '.')}</div>`}
+      </div>
+    </details>`).join("");
+  return `
+    <div class="stat-row">
+      <div class="stat"><div class="n">${all.length}</div><div class="l">Solid wood items</div></div>
+      <div class="stat"><div class="n" style="color:${low.length?'#e17e5b':'inherit'}">${low.length}</div><div class="l">Need reordering</div></div>
+      <div class="stat"><div class="n">${all.length - low.length}</div><div class="l">Stock OK</div></div>
+    </div>
+    ${low.length ? `<div class="card" style="border-color:#e17e5b;margin-bottom:14px"><h3 style="margin:0 0 8px">Reorder list — solid wood</h3>
+      ${low.map(b => `<div class="small" style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06)"><b>${esc(b.description)}</b> — ${totalQty(b)} ${esc(b.unit)} left (reorder at ${b.reorderLevel})${b.supplierId && state.data.suppliers && state.data.suppliers[b.supplierId] ? ' · ' + esc(state.data.suppliers[b.supplierId].name) : ''}</div>`).join("")}
+      <div class="small-muted" style="margin-top:8px">These are also in the Monday reorder email.</div>
+      ${userHasApp(state.currentUser, "orders") ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${solidOrderGroups(low).map(g => `<a class="btn btn-sm" href="/oak-core/orders/#reorder=${encodeURIComponent(g.spec)}">🛒 Order ${g.n} item${g.n===1?'':'s'}${g.name ? ' from ' + esc(g.name) : ''}</a>`).join("")}</div>` : ''}</div>` : ''}
+    <div class="toolbar">
+      <input type="text" placeholder="Search species or size…" value="${esc(state.solidSearch||'')}" oninput="state.solidSearch=this.value; render(); this.focus();">
+      ${can("boardAddBoard") ? `<button class="btn btn-primary" onclick="openAddSolid()">＋ Add solid wood</button>` : ''}
+    </div>
+    ${sections}`;
+}
+// One "Order" button per supplier: opens Orders with these items on a new order (qty = enough to get back above the reorder level).
+function solidOrderGroups(low){
+  const sups = state.data.suppliers || {}, groups = {};
+  low.forEach(b => {
+    const key = b.supplierId && sups[b.supplierId] ? b.supplierId : "";
+    const g = groups[key] || (groups[key] = { name: key ? sups[key].name : "", items: [] });
+    let need = (Number(b.reorderLevel) || 0) - totalQty(b); if (need <= 0) need = Number(b.reorderLevel) || 1;
+    g.items.push(b.code + "~" + (decUnit(b) ? r3(need) : Math.ceil(need)));
+  });
+  return Object.keys(groups).map(k => ({ name: groups[k].name, n: groups[k].items.length, spec: groups[k].items.map(x => "b:" + x).join(",") }));
+}
+function openAddSolid(){
+  const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
+  openModal(`
+    <div class="modal-head"><h3>Add solid wood</h3><button class="close-x" onclick="closeModal()">×</button></div>
+    <label>Species / name</label><input type="text" id="sw-species" placeholder="e.g. American White Oak">
+    <div class="field-row">
+      <div><label>Thickness (mm)</label><input type="number" id="sw-t" min="0" step="any" placeholder="e.g. 32"></div>
+      <div><label>Width (mm)</label><input type="number" id="sw-w" min="0" step="any" placeholder="e.g. 150 (blank = random widths)"></div>
+    </div>
+    <div class="field-row">
+      <div><label>Length (m, optional)</label><input type="number" id="sw-l" min="0" step="any" placeholder="e.g. 3.0"></div>
+      <div><label>Grade / note (optional)</label><input type="text" id="sw-grade" placeholder="e.g. FAS, kiln dried"></div>
+    </div>
+    <label>Counted in</label>
+    <select id="sw-unit">${Object.keys(SOLID_UNITS).map(u=>`<option value="${esc(u)}">${esc(SOLID_UNITS[u])}</option>`).join("")}</select>
+    <div class="field-row">
+      <div><label>Opening quantity</label><input type="number" id="sw-qty" value="0" min="0" step="any"></div>
+      <div><label>At</label><select id="sw-loc">${locations.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select></div>
+    </div>
+    <label>Reorder level (same unit)</label><input type="number" id="sw-reorder" value="0" min="0" step="any">
+    ${supplierSelectHtml('sw-supplier', null)}
+    <button class="btn btn-primary btn-block" style="margin-top:16px;" onclick="submitAddSolid()">Add solid wood</button>
+  `);
+}
+async function submitAddSolid(){
+  const num = id => parseFloat(String(document.getElementById(id).value || "").replace(",", "."));
+  const species = document.getElementById("sw-species").value.trim();
+  const t = num("sw-t"), w = num("sw-w"), len = num("sw-l"), grade = document.getElementById("sw-grade").value.trim();
+  const unit = document.getElementById("sw-unit").value, location = document.getElementById("sw-loc").value;
+  const dec = unit !== "pcs", qty0 = num("sw-qty") || 0, qty = dec ? r3(qty0) : Math.round(qty0);
+  const reorderLevel = dec ? r3(num("sw-reorder") || 0) : Math.round(num("sw-reorder") || 0);
+  const supplierId = document.getElementById("sw-supplier").value;
+  if (!species){ toast("Enter the species / name.", "error"); return; }
+  const size = (t && w ? t + "x" + w : t ? t + "mm" : w ? w + "mm wide" : "") + (len ? (t || w ? " · " : "") + len + "m" : "");
+  const desc = species + (size ? " " + size : "");
+  const cat = "Solid wood" + (grade ? " · " + grade : "");
+  let code = "";
+  const ok = await mutate((data) => {
+    if (data.boards.some(b => isSolid(b) && (b.description||'').toLowerCase() === desc.toLowerCase() && (b.category||'').toLowerCase() === cat.toLowerCase())) throw new Error(desc + " is already in solid wood.");
+    code = newBoardCode(data, "SW" + desc);
+    const b = { code, kind:"solid", species, thickness: t || "", width: w || "", length: len || "", grade, description: desc, category: cat, unit,
+      qty: { [location]: qty }, reorderLevel, reorderNotified:false, supplierId, stockType:"stock", job:"" };
+    data.boards.push(b);
+    checkReorder(data, b);
+    data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: state.currentUser.username, boardCode: code, action: "newBoard", qtyChange: qty, resultingQty: qty, reason: "Solid wood added" });
+    return data;
+  }, `${desc} added to solid wood.`);
+  if (ok) closeModal();
 }
 
 /* ---------------- STOCK REPORT PDF (added 2026-09-23, per user request:
@@ -1170,9 +1292,9 @@ function renderAddQty(){
       <label>Location</label>
       <select id="aq-loc">${locations.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
       <label>Board</label>
-      <select id="aq-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(boardName(b))}</option>`).join("")}</select>
+      <select id="aq-board">${boardOptions(boards, b=>`<option value="${esc(b.code)}" ${b.code===(state.pickAdd||'')?'selected':''}>${esc(boardName(b))}</option>`)}</select>
       <label>Quantity received</label>
-      <input type="number" id="aq-qty" min="1" step="1" placeholder="e.g. 20">
+      <input type="number" id="aq-qty" min="0" step="any" placeholder="e.g. 20">
       <label>Note (optional)</label>
       <input type="text" id="aq-note" placeholder="e.g. Delivery from supplier, invoice #1234">
       <button class="btn btn-primary btn-block" style="margin-top:18px;" onclick="submitAddQty()" ${state.busy?"disabled":""}>${state.busy?"Saving…":"Add stock"}</button>
@@ -1181,7 +1303,7 @@ function renderAddQty(){
 async function submitAddQty(){
   const code = document.getElementById("aq-board").value;
   const location = document.getElementById("aq-loc").value;
-  const qty = parseInt(document.getElementById("aq-qty").value, 10);
+  const qty = readQty(code, document.getElementById("aq-qty").value);
   const note = document.getElementById("aq-note").value.trim();
   if (!code || !qty || qty <= 0){ toast("Enter a valid quantity.", "error"); return; }
   const who = state.currentUser.username;
@@ -1189,7 +1311,7 @@ async function submitAddQty(){
     const board = findBoard(data, code);
     if (!board) throw new Error("That board no longer exists — refresh and try again.");
     if(typeof board.qty !== 'object') board.qty = {};
-    board.qty[location] = (board.qty[location] || 0) + qty;
+    board.qty[location] = r3((board.qty[location] || 0) + qty);
     checkReorder(data, board);
     data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "add", qtyChange: qty, resultingQty: totalQty(board), reason: (note || "Stock received") + ` (${location})` });
     return data;
@@ -1243,7 +1365,7 @@ function renderStockCount(){
             return `<tr>
               <td>${esc(b.description)} <span class="small-muted">${esc(b.category||'')}</span></td>
               <td>${sys} ${esc(b.unit||'')}</td>
-              <td><input type="number" min="0" step="1" style="width:90px;" value="${has ? draft[b.code] : ''}" oninput="countInput(this, '${esc(b.code)}', ${sys})"></td>
+              <td><input type="number" min="0" step="${decUnit(b) ? 'any' : '1'}" style="width:90px;" value="${has ? draft[b.code] : ''}" oninput="countInput(this, '${esc(b.code)}', ${sys})"></td>
               <td id="cd-${esc(b.code)}" class="${diff>0?'qty-plus':diff<0?'qty-minus':''}">${diff===null ? '—' : (diff>0?'+':'') + diff}</td>
             </tr>`;
           }).join("") || `<tr><td colspan="4" class="empty">No boards match.</td></tr>`}
@@ -1271,11 +1393,11 @@ function countInput(input, code, sys){
   const loc = countLocation();
   const draft = loadCountDraft(loc);
   if (input.value === "") delete draft[code];
-  else draft[code] = Math.max(0, parseInt(input.value, 10) || 0);
+  else draft[code] = Math.max(0, readQty(code, input.value) || 0);
   saveCountDraft(loc, draft);
   const cell = document.getElementById("cd-" + code);
   if (cell){
-    const diff = draft[code] === undefined ? null : draft[code] - sys;
+    const diff = draft[code] === undefined ? null : r3(draft[code] - sys);
     cell.textContent = diff === null ? "—" : (diff > 0 ? "+" : "") + diff;
     cell.className = diff > 0 ? "qty-plus" : diff < 0 ? "qty-minus" : "";
   }
@@ -1339,9 +1461,9 @@ function renderRemoveQty(){
       <label>Location</label>
       <select id="rq-loc">${locations.map(l=>`<option value="${esc(l)}" ${l===pick.loc?'selected':''}>${esc(l)}</option>`).join("")}</select>
       <label>Board</label>
-      <select id="rq-board">${boards.map(b=>`<option value="${esc(b.code)}" ${b.code===pick.code?'selected':''}>${esc(boardName(b))} — on hand: ${totalQty(b)} ${esc(b.unit)}</option>`).join("")}</select>
+      <select id="rq-board">${boardOptions(boards, b=>`<option value="${esc(b.code)}" ${b.code===pick.code?'selected':''}>${esc(boardName(b))} — on hand: ${totalQty(b)} ${esc(b.unit)}</option>`)}</select>
       <label>Quantity used / removed</label>
-      <input type="number" id="rq-qty" min="1" step="1" placeholder="e.g. 5">
+      <input type="number" id="rq-qty" min="0" step="any" placeholder="e.g. 5">
       <label>Taken by</label>
       <select id="rq-takenby" onchange="document.getElementById('rq-takenby-other-wrap').style.display=this.value==='__other'?'block':'none'">
         ${[...new Set((state.sharedUsers||[]).map(u=>u.username).filter(Boolean))].sort((a,b)=>a.localeCompare(b)).map(n=>`<option value="${esc(n)}" ${n===state.currentUser.username?'selected':''}>${esc(n)}</option>`).join("")}
@@ -1367,7 +1489,7 @@ function renderRemoveQty(){
 async function submitRemoveQty(){
   const code = document.getElementById("rq-board").value;
   const location = document.getElementById("rq-loc").value;
-  const qty = parseInt(document.getElementById("rq-qty").value, 10);
+  const qty = readQty(code, document.getElementById("rq-qty").value);
   let reason = document.getElementById("rq-reason").value;
   if (reason === "Other"){ reason = document.getElementById("rq-other").value.trim(); }
   const notes = document.getElementById("rq-notes").value.trim();
@@ -1386,7 +1508,7 @@ async function submitRemoveQty(){
     if (qty > here){
       if (!confirm(`Only ${here} ${board.unit} on hand at ${location} — remove anyway? Stock will show as negative there.`)) throw new Error("Cancelled — nothing was removed.");
     }
-    board.qty[location] = here - qty;
+    board.qty[location] = r3(here - qty);
     checkReorder(data, board);
     // notes kept as its own field (not folded into reason) so the
     // Cutting Log can show it clearly — see renderCuttingLog().
@@ -1415,9 +1537,9 @@ function renderSendToDispatch(){
       <label>Location</label>
       <select id="sd-loc">${locations.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
       <label>Board</label>
-      <select id="sd-board">${boards.map(b=>`<option value="${esc(b.code)}">${esc(boardName(b))} — on hand: ${totalQty(b)} ${esc(b.unit)}</option>`).join("")}</select>
+      <select id="sd-board">${boardOptions(boards, b=>`<option value="${esc(b.code)}">${esc(boardName(b))} — on hand: ${totalQty(b)} ${esc(b.unit)}</option>`)}</select>
       <label>Quantity</label>
-      <input type="number" id="sd-qty" min="1" step="1" value="1">
+      <input type="number" id="sd-qty" min="0" step="any" value="1">
       <label>Reference / job</label>
       <input type="text" id="sd-ref" placeholder="e.g. NH Hotel">
       <button class="btn btn-primary btn-block" style="margin-top:18px;" onclick="submitSendToDispatch()" ${state.busy?"disabled":""}>${state.busy?"Sending…":"Send to Dispatch"}</button>
@@ -1427,7 +1549,7 @@ async function submitSendToDispatch(){
   if(!can("boardSendToDispatch")) return;
   const code = document.getElementById("sd-board").value;
   const location = document.getElementById("sd-loc").value;
-  const qty = parseInt(document.getElementById("sd-qty").value, 10);
+  const qty = readQty(code, document.getElementById("sd-qty").value);
   const ref = document.getElementById("sd-ref").value.trim();
   if (!code || !qty || qty <= 0){ toast("Enter a valid quantity.", "error"); return; }
   if (!dispatchBoardRef){ toast("Not connected to the Dispatch app yet — try again in a moment.", "error"); return; }
@@ -1445,7 +1567,7 @@ async function submitSendToDispatch(){
       const b = findBoard(data, code);
       if (!b) throw new Error("That board no longer exists — refresh and try again.");
       if(typeof b.qty !== 'object') b.qty = {};
-      b.qty[location] = (b.qty[location] || 0) - qty;
+      b.qty[location] = r3((b.qty[location] || 0) - qty);
       checkReorder(data, b);
       data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "sentToDispatch", qtyChange: -qty, resultingQty: totalQty(b), reason: `Sent to dispatch${ref ? ' — ' + ref : ''} (${location})` });
       return data;
@@ -1494,9 +1616,9 @@ function renderTransfer(){
       <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
         <select style="flex:1" onchange="transferForm.lines[${i}].code=this.value; render()">
           <option value="">— pick a board —</option>
-          ${boards.map(b=>`<option value="${esc(b.code)}" ${b.code===l.code?"selected":""}>${esc(boardName(b))} — ${(b.qty && b.qty[f.from]) || 0} at ${esc(f.from)}</option>`).join("")}
+          ${boardOptions(boards, b=>`<option value="${esc(b.code)}" ${b.code===l.code?"selected":""}>${esc(boardName(b))} — ${(b.qty && b.qty[f.from]) || 0} ${esc(b.unit||"")} at ${esc(f.from)}</option>`)}
         </select>
-        <input type="number" min="1" step="1" value="${esc(l.qty)}" style="width:80px" oninput="transferForm.lines[${i}].qty=this.value">
+        <input type="number" min="0" step="any" value="${esc(l.qty)}" style="width:80px" oninput="transferForm.lines[${i}].qty=this.value">
         ${f.lines.length > 1 ? `<button class="btn btn-ghost btn-sm" onclick="transferForm.lines.splice(${i},1); render()">✕</button>` : ""}
       </div>`;
   return `
@@ -1521,7 +1643,7 @@ async function submitTransfer(){
   if(!can("boardSendToDispatch")) return;
   const f = transferForm, from = f.from, toBranch = f.to !== "__other", to = toBranch ? f.to : String(f.other || "").trim();
   if (!to){ toast("Where are the boards going?", "error"); return; }
-  const lines = f.lines.map(l => ({ code:l.code, qty:parseInt(l.qty, 10) })).filter(l => l.code);
+  const lines = f.lines.map(l => ({ code:l.code, qty:readQty(l.code, l.qty) })).filter(l => l.code);
   if (!lines.length){ toast("Pick at least one board.", "error"); return; }
   if (lines.some(l => !l.qty || l.qty <= 0)){ toast("Enter a quantity for every board.", "error"); return; }
   if (new Set(lines.map(l => l.code)).size !== lines.length){ toast("A board is in the list twice — put it on one line.", "error"); return; }
@@ -1561,8 +1683,8 @@ async function submitTransfer(){
       lines.forEach(l => {
         const b = findBoard(data, l.code); if (!b) return;
         if (typeof b.qty !== "object" || !b.qty) b.qty = {};
-        b.qty[from] = (b.qty[from] || 0) - l.qty;
-        if (toBranch) b.qty[to] = (b.qty[to] || 0) + l.qty;
+        b.qty[from] = r3((b.qty[from] || 0) - l.qty);
+        if (toBranch) b.qty[to] = r3((b.qty[to] || 0) + l.qty);
         checkReorder(data, b);
         data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: l.code, action: "transfer", qtyChange: toBranch ? 0 : -l.qty, resultingQty: totalQty(b),
           reason: `Transfer ${l.qty} ${from} → ${to} (${number})${ref ? " — " + ref : ""}` });
@@ -1616,7 +1738,7 @@ function supplierSelectHtml(id, selectedId){
 
 /* ---------------- BOARDS ADMIN (add / edit) ---------------- */
 function renderBoardsAdmin(){
-  const boards = [...state.data.boards].sort((a,b)=>a.code.localeCompare(b.code));
+  const boards = [...state.data.boards].filter(b => !isSolid(b)).sort((a,b)=>a.code.localeCompare(b.code));
   const locations = state.data.locations && state.data.locations.length ? state.data.locations : ["Main"];
   return `
     <div class="card" style="margin-bottom:18px;">
@@ -1680,10 +1802,10 @@ function openEditBoard(code){
     <label>Board name</label><input type="text" id="eb-desc" value="${esc(b.description)}">
     <div class="field-row">
       <div><label>Category / size</label><input type="text" id="eb-cat" value="${esc(b.category||'')}"></div>
-      <div><label>Unit</label><input type="text" id="eb-unit" value="${esc(b.unit)}"></div>
+      <div><label>${isSolid(b) ? 'Counted in' : 'Unit'}</label>${isSolid(b) ? `<select id="eb-unit">${Object.keys(SOLID_UNITS).map(u=>`<option value="${esc(u)}" ${u===b.unit?'selected':''}>${esc(SOLID_UNITS[u])}</option>`).join("")}</select>` : `<input type="text" id="eb-unit" value="${esc(b.unit)}">`}</div>
     </div>
     ${boardTypeFieldsHtml('eb', b)}
-    <div id="eb-reorderwrap" style="display:${isJobBoard(b)?'none':'block'}"><label>Reorder level</label><input type="number" id="eb-reorder" value="${b.reorderLevel}" min="0"></div>
+    <div id="eb-reorderwrap" style="display:${isJobBoard(b)?'none':'block'}"><label>Reorder level</label><input type="number" id="eb-reorder" value="${b.reorderLevel}" min="0" step="any"></div>
     ${supplierSelectHtml('eb-supplier', b.supplierId || '')}
     <div class="helptext">To change on-hand quantity, use Add stock / Remove stock so it's logged with a reason.</div>
     <button class="btn btn-primary btn-block" style="margin-top:16px;" onclick="submitEditBoard('${esc(code)}')">Save changes</button>
@@ -1693,7 +1815,7 @@ async function submitEditBoard(code){
   const desc = document.getElementById("eb-desc").value.trim();
   const cat = document.getElementById("eb-cat").value.trim();
   const unit = document.getElementById("eb-unit").value.trim() || "EA";
-  const reorderLevel = parseInt(document.getElementById("eb-reorder").value, 10) || 0;
+  const reorderLevel = r3(parseFloat(String(document.getElementById("eb-reorder").value).replace(",", ".")) || 0);
   const supplierId = document.getElementById("eb-supplier").value;
   const stockType = document.getElementById("eb-type").value === "job" ? "job" : "stock";
   const job = document.getElementById("eb-job").value.trim();

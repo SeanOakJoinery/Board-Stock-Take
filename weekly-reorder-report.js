@@ -100,7 +100,7 @@ function collectLowBoards(boardStock) {
   const out = [];
   boards.forEach((b) => {
     if (b && b.stockType === "job") return; // once-off job boards are never reordered
-    const total = typeof b.qty === "number" ? b.qty : Object.values(b.qty || {}).reduce((a, v) => a + (Number(v) || 0), 0);
+    const total = Math.round((typeof b.qty === "number" ? b.qty : Object.values(b.qty || {}).reduce((a, v) => a + (Number(v) || 0), 0)) * 1000) / 1000;
     if (total <= (b.reorderLevel || 0)) {
       const supplier = b.supplierId ? suppliers[b.supplierId] : null;
       out.push({
@@ -110,7 +110,7 @@ function collectLowBoards(boardStock) {
         supplierContact: supplier ? supplier.contactPerson : null,
         supplierCc: supplier ? supplier.ccEmail : null,
         sendDirect: !!(supplier && supplier.sendDirect),
-        app: "Board Stock Take",
+        app: b.kind === "solid" ? "Solid wood" : "Board Stock Take",   // solid wood section (2026-10-13)
       });
     }
   });
