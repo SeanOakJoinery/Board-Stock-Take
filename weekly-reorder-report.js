@@ -129,6 +129,7 @@ function collectLowConsumables(consumablesStock) {
   const UNIT_WORD = { per500: "pack(s)", each: "each", pair: "pair(s)", roll: "roll(s)", tin: "tin(s)" };
   const ROLL_FRACTION = { Full: 1, "3/4": 0.75, "1/2": 0.5, "1/4": 0.25 };
   Object.values(consumablesStock.screwItems || {}).forEach((item) => {
+    if (item && item.stockType === "job") return; // bought for one job (Orders "For: Job only") — never reordered (2026-10-17)
     const unit = UNIT_WORD[item.unit] ? item.unit : "per500";
     const whole = typeof item.qtyByLocation === "object"
       ? Object.values(item.qtyByLocation || {}).reduce((a, v) => a + (Number(v) || 0), 0)

@@ -510,6 +510,8 @@ if (CONFIG_OK && window.firebase) {
     // Still used for dispatchBoard/items (stock→dispatch handoff).
     // Shared users sync/save now goes through OakCore (see SHARED AUTH).
     dispatchBoardRef = firebase.database().ref("dispatchBoard");
+    // Projects (2026-10-17): Remove Stock can record which job / drawing / assembly the boards were cut for
+    firebase.database().ref("projects/list").on("value", s => { state.projects = s.val() || {}; }, () => { state.projects = {}; });
     if (window.OakCore) {
       oak = OakCore.createApp({ appId: "boardStock", readOnly: false });
       oak.init();
@@ -1461,9 +1463,10 @@ function renderRemoveQty(){
       <label>Location</label>
       <select id="rq-loc">${locations.map(l=>`<option value="${esc(l)}" ${l===pick.loc?'selected':''}>${esc(l)}</option>`).join("")}</select>
       <label>Board</label>
-      <select id="rq-board">${boardOptions(boards, b=>`<option value="${esc(b.code)}" ${b.code===pick.code?'selected':''}>${esc(boardName(b))} — on hand: ${totalQty(b)} ${esc(b.unit)}</option>`)}</select>
+      <select id="rq-board" onchange="rqBoardChanged()">${boardOptions(boards, b=>`<option value="${esc(b.code)}" ${b.code===pick.code?'selected':''}>${esc(boardName(b))} — on hand: ${totalQty(b)} ${esc(b.unit)}</option>`)}</select>
       <label>Quantity used / removed</label>
       <input type="number" id="rq-qty" min="0" step="any" placeholder="e.g. 5">
+      ${rqJobHtml(pick.code)}
       <label>Taken by</label>
       <select id="rq-takenby" onchange="document.getElementById('rq-takenby-other-wrap').style.display=this.value==='__other'?'block':'none'">
         ${[...new Set((state.sharedUsers||[]).map(u=>u.username).filter(Boolean))].sort((a,b)=>a.localeCompare(b)).map(n=>`<option value="${esc(n)}" ${n===state.currentUser.username?'selected':''}>${esc(n)}</option>`).join("")}
@@ -1486,6 +1489,37 @@ function renderRemoveQty(){
       <button class="btn btn-danger btn-block" style="margin-top:18px;" onclick="submitRemoveQty()" ${state.busy?"disabled":""}>${state.busy?"Saving…":"Remove stock"}</button>
     </div>`;
 }
+/* ---- cut for a job (2026-10-17): pick the job → drawing → assembly; the boards are recorded on the job in Projects ---- */
+function rqJobs(){ return Object.keys(state.projects || {}).map(id => ({ id, p: state.projects[id] })).filter(x => x.p && x.p.status !== "complete")
+  .sort((a,b) => String(b.p.jobNo||"").localeCompare(String(a.p.jobNo||""), undefined, { numeric:true })); }
+function rqJobLabel(id){ const p = (state.projects || {})[id]; return p ? (p.jobNo ? p.jobNo + " · " : "") + (p.name || "") : ""; }
+function rqJobHtml(code){
+  const b = code ? findBoard(state.data, code) : null, pre = b && isJobBoard(b) && b.projectId ? b.projectId : "";
+  if (!rqJobs().length && !pre) return "";
+  setTimeout(() => { if (pre) rqJobChanged(); }, 0);
+  return `<label>Cut for a job (optional)</label>
+    <select id="rq-job" onchange="rqJobChanged()"><option value="">— not for a job —</option>${rqJobs().map(x => `<option value="${esc(x.id)}" ${x.id===pre?'selected':''}>${esc(rqJobLabel(x.id))}</option>`).join("")}</select>
+    <div id="rq-dwgwrap"></div>`;
+}
+function rqBoardChanged(){
+  const b = findBoard(state.data, document.getElementById("rq-board").value), j = document.getElementById("rq-job");
+  if (j && b && isJobBoard(b) && b.projectId && state.projects && state.projects[b.projectId]){ j.value = b.projectId; rqJobChanged(); }
+}
+function rqJobChanged(){
+  const pid = (document.getElementById("rq-job") || {}).value, w = document.getElementById("rq-dwgwrap"); if (!w) return;
+  const p = pid && state.projects ? state.projects[pid] : null;
+  if (!p){ w.innerHTML = ""; return; }
+  const r = document.getElementById("rq-reason"); if (r && r.value !== "Job allocation"){ r.value = "Job allocation"; document.getElementById("rq-other-wrap").style.display = "none"; }
+  const ds = Object.keys(p.drawings || {}).map(id => Object.assign({ id }, p.drawings[id])).sort((a,b) => String(a.no||"").localeCompare(String(b.no||""), undefined, { numeric:true }));
+  w.innerHTML = ds.length ? `<label>Drawing</label><select id="rq-dwg" onchange="rqDwgChanged()"><option value="">— whole job —</option>${ds.map(d => `<option value="${esc(d.id)}">${esc((d.no ? d.no + " — " : "") + (d.title || ""))}</option>`).join("")}</select><div id="rq-asmwrap"></div>`
+    : `<div class="small-muted" style="margin-top:6px">This job has no drawings yet — it will be recorded against the whole job.</div>`;
+}
+function rqDwgChanged(){
+  const pid = document.getElementById("rq-job").value, did = document.getElementById("rq-dwg").value, w = document.getElementById("rq-asmwrap");
+  const d = did && state.projects[pid] && state.projects[pid].drawings ? state.projects[pid].drawings[did] : null;
+  const as = d ? Object.keys(d.assemblies || {}).map(id => Object.assign({ id }, d.assemblies[id])).sort((a,b) => (Number(a.n)||0) - (Number(b.n)||0)) : [];
+  w.innerHTML = as.length ? `<label>Assembly</label><select id="rq-asm"><option value="">— whole drawing —</option>${as.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("")}</select>` : "";
+}
 async function submitRemoveQty(){
   const code = document.getElementById("rq-board").value;
   const location = document.getElementById("rq-loc").value;
@@ -1500,6 +1534,8 @@ async function submitRemoveQty(){
   if (!code || !qty || qty <= 0){ toast("Enter a valid quantity.", "error"); return; }
   if (!reason){ toast("A reason is required to remove stock.", "error"); return; }
   const who = state.currentUser.username;
+  const jobId = (document.getElementById("rq-job") || {}).value || "", dwgId = (document.getElementById("rq-dwg") || {}).value || "", asmId = (document.getElementById("rq-asm") || {}).value || "";
+  const jobTxt = jobId ? " — cut for " + rqJobLabel(jobId) : "";
   const ok = await mutate((data) => {
     const board = findBoard(data, code);
     if (!board) throw new Error("That board no longer exists — refresh and try again.");
@@ -1512,9 +1548,16 @@ async function submitRemoveQty(){
     checkReorder(data, board);
     // notes kept as its own field (not folded into reason) so the
     // Cutting Log can show it clearly — see renderCuttingLog().
-    data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "remove", qtyChange: -qty, resultingQty: totalQty(board), reason: reason + ` (${location})`, notes, takenBy });
+    data.log.unshift({ id: uid(), ts: new Date().toISOString(), user: who, boardCode: code, action: "remove", qtyChange: -qty, resultingQty: totalQty(board), reason: reason + ` (${location})` + jobTxt, notes, takenBy });
     return data;
-  }, `Removed ${qty} from ${boardNameByCode(code)} at ${location}.`);
+  }, `Removed ${qty} from ${boardNameByCode(code)} at ${location}.` + (jobId ? " Recorded on " + rqJobLabel(jobId) + "." : ""));
+  if (ok && jobId){
+    const b = findBoard(state.data, code) || {};
+    const rec = { ts:new Date().toISOString(), by:who, type: isSolid(b) ? "solid" : "board", qty, unit:b.unit || "EA", item:(b.description || code) + (b.category && !isSolid(b) ? " (" + b.category + ")" : ""),
+      location, stock:{ app:"board", code, location }, drawingId:dwgId, asmId, note:[notes, "cut — Board Stock", takenBy !== who ? "taken by " + takenBy : ""].filter(Boolean).join(" · "), cut:true };
+    try { await firebase.database().ref("projects/materials/" + jobId + "/" + uid()).set(rec); }
+    catch(e){ toast("Removed from stock, but it couldn't be recorded on the job — add it in Projects → Materials.", "error"); }
+  }
   if (ok){ document.getElementById("rq-qty").value = ""; const o = document.getElementById("rq-other"); if(o) o.value = ""; const n = document.getElementById("rq-notes"); if(n) n.value = ""; }
 }
 
